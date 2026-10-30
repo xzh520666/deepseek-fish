@@ -94,10 +94,12 @@ mkdir -p "$QQ_BRIDGE_DIR/roles"
 cp -v "$REPO_DIR/persona/role-dafeiyu.md" "$QQ_BRIDGE_DIR/roles/大肥鱼.md"
 ok "人设卡就位（role 名「大肥鱼」）"
 
-say "6/9 部署日记 MCP"
-mkdir -p /opt/diary-mcp
+say "6/9 部署日记与热搜 MCP"
+mkdir -p /opt/diary-mcp /opt/hot-search-mcp
 cp -v "$REPO_DIR/mcp/diary-mcp.js" /opt/diary-mcp/diary-mcp.js
-ok "日记 MCP 就位"
+cp -v "$REPO_DIR/mcp/hot-search-mcp.js" /opt/hot-search-mcp/hot-search-mcp.js
+cp -v "$REPO_DIR/mcp/hot-search.mjs" /opt/hot-search-mcp/hot-search.mjs
+ok "日记与热搜 MCP 就位"
 
 say "7/9 生成 config.json"
 if [ -f "$QQ_BRIDGE_DIR/config.json" ]; then

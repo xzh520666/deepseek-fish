@@ -42,6 +42,7 @@ const SAFE_PREFIXES = [
   'mcp__web-search-safe__',
   'mcp__phone__',
   'mcp__diary__',
+  'mcp__hot-search__',
 ]
 
 // 无害模型侧工具：ask_user_question 用于把问题转给管理员/用户，

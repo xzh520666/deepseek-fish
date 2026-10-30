@@ -59,6 +59,17 @@
         args:
           - '/opt/diary-mcp/diary-mcp.js'
 
+# === hot-search MCP（自研：微博/知乎热搜，冷场抛话题、学热点梗）===
+- insert:
+    - id: mcp-hot-search
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: hot-search
+        transport: stdio
+        command: '/usr/bin/node'
+        args:
+          - '/opt/hot-search-mcp/hot-search-mcp.js'
+
 # === phone MCP（可选：电脑上的模拟器，经反向隧道暴露）===
 # 不用手机能力就整段删掉
 - insert:
