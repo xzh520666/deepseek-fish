@@ -19,10 +19,12 @@ $ServeJs  = '{{BRIDGE_DIR}}\serve-shots.js'
 $NodeExe  = 'G:\nodejs\node.exe'
 $GatewayBat = '{{BRIDGE_DIR}}\run-gateway.bat'
 $ShotsBat   = '{{BRIDGE_DIR}}\run-shots.bat'
+$EmbedBat   = '{{BRIDGE_DIR}}\run-embed.bat'
 $ShotDir  = '{{BRIDGE_DIR}}\shots'
 $AdbExe   = 'G:\Program Files\Netease\MuMu\nx_main\adb.exe'
 $McpPort  = 8899
 $ShotPort = 8898
+$EmbedPort = 8897
 $DevAddr  = '127.0.0.1:16384'
 $SshKey   = '{{BRIDGE_DEPLOY_DIR}}\alibabacloud_ed25519'
 $SshHost  = 'root@{{SERVER_IP}}'
@@ -111,13 +113,14 @@ function Clear-OldShots {
 # 反向隧道：服务器靠它访问 8898/8899（以及备用的 15555）
 function Ensure-Tunnel {
   $alive = Get-CimInstance Win32_Process -Filter "Name='ssh.exe'" -ErrorAction SilentlyContinue |
-    Where-Object { $_.CommandLine -match '8898:127\.0\.0\.1:8898' -and $_.CommandLine -match '8899:127\.0\.0\.1:8899' }
+    Where-Object { $_.CommandLine -match '8898:127\.0\.0\.1:8898' -and $_.CommandLine -match '8899:127\.0\.0\.1:8899' -and $_.CommandLine -match '8897:127\.0\.0\.1:8897' }
   if ($alive) { return }
   try {
     Start-Process -FilePath 'ssh.exe' -ArgumentList @(
       '-i', "`"$SshKey`"", '-N',
       '-R', '8898:127.0.0.1:8898',
       '-R', '8899:127.0.0.1:8899',
+      '-R', '8897:127.0.0.1:8897',
       '-R', '15555:127.0.0.1:16384',
       '-o', 'StrictHostKeyChecking=accept-new',
       '-o', 'ServerAliveInterval=30',
@@ -164,6 +167,19 @@ while ($true) {
       else { Write-Log 'serve-shots did not come up, retry in 20s' }
     } catch {
       Write-Log ('serve-shots start failed: ' + $_.Exception.Message)
+    }
+  }
+
+  # ---- 8897: 本地 embedding 服务（给服务器的记忆向量检索用）----
+  if (-not (Test-Port $EmbedPort)) {
+    Write-Log 'port 8897 down -> restarting embed-server'
+    try {
+      Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', ('"{0}"' -f $EmbedBat) -WindowStyle Hidden
+      Start-Sleep -Seconds 8
+      if (Test-Port $EmbedPort) { Write-Log 'embed-server is up on 8897' }
+      else { Write-Log 'embed-server did not come up, retry in 20s' }
+    } catch {
+      Write-Log ('embed-server start failed: ' + $_.Exception.Message)
     }
   }
 

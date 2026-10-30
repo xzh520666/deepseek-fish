@@ -24,12 +24,33 @@ export function localEncoder(config = {}, load = () => import('@huggingface/tran
   };
 }
 
+// 远端 embedding：通过 http 调用电脑端 embed-server（经反向隧道暴露到服务器 127.0.0.1），
+// 服务器不再本地加载模型。契约同 localEncoder：text -> number[]。
+export function httpEncoder(config = {}) {
+  const base = String(config.url ?? '').replace(/\/+$/, '');
+  if (!base) throw new Error('embedding.url 未配置');
+  const timeoutMs = Math.max(100, Math.min(10000, Number(config.timeoutMs) || 1500));
+  return async text => {
+    const res = await fetch(`${base}/embed`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text: String(text) }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!res.ok) throw new Error(`embed 服务返回 ${res.status}`);
+    const data = await res.json();
+    if (!validVector(data.vector)) throw new Error('embed 返回无效向量');
+    return data.vector;
+  };
+}
+
 export class MemoryRetriever {
-  constructor({ embed, model = 'local', timeoutMs = 1500, cacheSize = 512, onError = () => {} } = {}) {
+  constructor({ embed, model = 'local', timeoutMs = 1500, cacheSize = 512, minSemantic, onError = () => {} } = {}) {
     this.embed = embed;
     this.model = model;
     this.timeoutMs = timeoutMs;
     this.cacheSize = cacheSize;
+    this.minSemantic = Number.isFinite(Number(minSemantic)) ? Math.max(0, Math.min(1, Number(minSemantic))) : 0.7;
     this.cache = new Map();
     this.busy = false;
     this.onError = onError;
@@ -50,6 +71,10 @@ export class MemoryRetriever {
         && (!options.subjectId || m.subjectId === String(options.subjectId)))) {
         const cacheKey = JSON.stringify([record.id, record.text, this.model]);
         let embedding = this.cache.get(cacheKey);
+        // 优先复用记录里已持久化的向量，重启/换进程后无需对同一批记忆重新编码。
+        if (!embedding && record.embeddingModel === this.model && validVector(record.embedding)) {
+          embedding = record.embedding;
+        }
         if (!embedding) {
           embedding = await this.embed(record.text);
           if (generation === this.generation) this.cache.set(cacheKey, embedding);
@@ -58,7 +83,7 @@ export class MemoryRetriever {
         entries.push({ ...record, embedding, embeddingModel: this.model });
       }
       // 忘记或更新发生在异步推理期间时，调用方还须用当前存储重新过滤结果。
-      return search(entries, { ...options, queryVector, embeddingModel: this.model });
+      return search(entries, { ...options, queryVector, embeddingModel: this.model, minSemantic: this.minSemantic });
     };
     let timer;
     const pending = run().finally(() => { this.busy = false; });

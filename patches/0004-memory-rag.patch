@@ -5,7 +5,7 @@
  import os from 'node:os';
  import { EmotionPolicy } from './emotion-policy.mjs';
 +import { migrate, remember, search, forget, digest, visible, validKey } from './memory-store.mjs';
-+import { MemoryRetriever, localEncoder } from './memory-retriever.mjs';
++import { MemoryRetriever, localEncoder, httpEncoder } from './memory-retriever.mjs';
  import http from 'node:http';
  import path from 'node:path';
  import crypto from 'node:crypto';
@@ -300,10 +300,13 @@
 +  const memoryTextHash = text => crypto.createHash('sha256').update(String(text).normalize('NFKC').toLowerCase().replace(/\s+/g, ' ').trim()).digest('hex');
 +  const embeddingConfig = cfg.longMemory.embedding ?? {};
 +  const memoryRetriever = new MemoryRetriever({
-+    embed: embeddingConfig.enabled === true ? localEncoder(embeddingConfig) : undefined,
-+    model: String(embeddingConfig.modelPath ?? 'local'),
++    embed: embeddingConfig.enabled === true
++      ? (embeddingConfig.url ? httpEncoder(embeddingConfig) : localEncoder(embeddingConfig))
++      : undefined,
++    model: String(embeddingConfig.url ?? embeddingConfig.modelPath ?? 'local'),
 +    timeoutMs: Math.max(100, Math.min(10000, Number(embeddingConfig.timeoutMs) || 1500)),
 +    cacheSize: Number(cfg.longMemory.maxRecords) || 5000,
++    minSemantic: embeddingConfig.minSemantic,
 +    onError: message => log('[memory] ' + message),
 +  });
 +  function commitLongMemory(records) {

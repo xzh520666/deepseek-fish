@@ -22,8 +22,17 @@ export class EmotionPolicy {
     const factor = previous ? 2 ** (-Math.max(0, now - previous.at) / this.halfLifeMs) : 0;
     let tension = (previous?.tension ?? 0) * factor;
     const text = String(message.text || message.plain || '');
-    const negative = /难过|委屈|焦虑|烦死|崩溃|好累|累死|白干|失眠/.test(text)
-      && !/不(?:太)?难过|没(?:有)?生气|不焦虑/.test(text);
+    const EMOTION_RE = /难过|委屈|焦虑|烦死|崩溃|好累|累死|白干|失眠/;
+    const NEGATE_RE = /不(?:太|怎么)?难过|没(?:有|那么)?生气|不焦虑|不委屈|不难过|不烦/;
+    // 反讽（"难过个屁"）、第三方主语（"他难过"）、歧义（"这关太难过了"=难以通过）
+    const SARCASM_RE = /(?:难过|委屈|烦|累|焦虑|崩溃)(?:个屁|个鬼|个锤|个毛|个蛋)/;
+    const THIRD_PERSON_RE = /(?:^|[。！？!?\s])(?:他|她|它|别人|某人|他们|她们)[^我。！？!?\n]{0,15}(?:难过|委屈|焦虑|烦死|崩溃|好累|失眠)/;
+    const DIFFICULTY_RE = /(?:游戏|关卡|这关|那关|副本|boss|这题|那题|考试|面试|题目|论文)[^。！？!?\n]{0,4}难过/;
+    const negative = EMOTION_RE.test(text)
+      && !NEGATE_RE.test(text)
+      && !SARCASM_RE.test(text)
+      && !THIRD_PERSON_RE.test(text)
+      && !DIFFICULTY_RE.test(text);
     if (negative && previous?.signature !== signature) tension = Math.min(1, tension + 0.25);
     let strategy = 'chat';
     if (/晚安|先下了|不聊了|去洗澡|先睡了/.test(text)) strategy = 'close';

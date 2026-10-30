@@ -39,3 +39,12 @@ test('state is bounded and prompt labels uncertainty', () => {
   assert.equal(p.scopes.size, 2);
   assert.match(p.prompt('3', [msg('难过')]), /弱提示/);
 });
+
+test('non-emotional uses of emotional words are not treated as mood', () => {
+  const p = new EmotionPolicy({ clock: () => 1000 });
+  assert.equal(p.observe('group:1', [msg('我一点都不难过')]).strategy, 'chat');
+  assert.equal(p.observe('group:1', [msg('这游戏也太难过了')]).strategy, 'chat');
+  assert.equal(p.observe('group:1', [msg('他难过关我啥事')]).strategy, 'chat');
+  assert.equal(p.observe('group:1', [msg('难过个屁')]).strategy, 'chat');
+  assert.equal(p.observe('group:1', [msg('我好难过啊')]).strategy, 'comfort');
+});

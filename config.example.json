@@ -29,7 +29,7 @@
   "consolePort": 3100,
   "passiveMode": true,
   "sharedSession": {
-    "enabled": false
+    "enabled": true
   },
   "handoff": {
     "enabled": true,
@@ -39,7 +39,7 @@
     "validHours": 48
   },
   "crossChat": {
-    "enabled": false,
+    "enabled": true,
     "includeCurrent": true,
     "maxLines": 10,
     "windowMs": 43200000,
@@ -50,13 +50,15 @@
     "maxLines": 6,
     "summarizeEveryMessages": 40,
     "autoSummarize": true,
-    "isolation": true,
+    "isolation": false,
     "maxRecords": 5000,
     "embedding": {
       "enabled": false,
+      "url": "http://127.0.0.1:8897",
       "modelPath": "/opt/models/your-local-embedding-model",
       "dtype": "q8",
-      "timeoutMs": 1500
+      "timeoutMs": 1500,
+      "minSemantic": 0.7
     }
   },
   "dailyDiary": {

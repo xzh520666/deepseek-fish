@@ -50,6 +50,33 @@ Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' `
 
 `cordis.patch.yml` 里保留 `mcp-phone` 那段即可（指向 `http://127.0.0.1:8899/mcp`）。
 
+## 电脑侧 embedding（可选，给记忆向量检索用）
+
+把 embedding 模型从 2核2G 服务器搬到这台电脑上：`embed-server.js` 在 8897 端口
+提供一个本地 HTTP embedding 服务，经反向隧道暴露给服务器；服务器上的 qq-bridge
+在 `embedding.url` 配置后，通过 http 调用它做记忆向量检索，不再本地加载模型。
+
+准备：
+1. 本地 ONNX embedding 模型（推荐 `bge-small-zh-v1.5`，含 tokenizer/config/onnx 的目录）
+2. 电脑上 `npm i @huggingface/transformers`（embed-server.js 运行依赖）
+
+配置 `run-embed.bat` 顶部的 `EMBED_MODEL_PATH`，指向模型目录；守护进程会像
+`serve-shots` 一样自动拉起它（端口 8897 掉线自动重启）。
+
+服务器侧 `config.json`：
+
+```json
+"embedding": {
+  "enabled": true,
+  "url": "http://127.0.0.1:8897",
+  "dtype": "q8",
+  "timeoutMs": 1500,
+  "minSemantic": 0.6
+}
+```
+
+配了 `url` 就走 http 调用；不配则回退到服务器本地 `modelPath` 加载。
+
 ## 注意
 
 - **不要**让脚本自动启动模拟器——用户关掉就应该保持关闭
