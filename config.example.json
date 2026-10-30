@@ -1,0 +1,60 @@
+{
+  "_说明": "复制成 config.json 再改。所有 {{...}} 都要换成你自己的值。",
+  "dsh": {
+    "baseUrl": "http://127.0.0.1:3080",
+    "provider": "deepseek-official",
+    "model": "deepseek-v4-flash-vision-exp",
+    "reasoningEffort": "max"
+  },
+  "snowluma": {
+    "wsUrl": "ws://127.0.0.1:3001",
+    "httpUrl": "http://127.0.0.1:3000",
+    "accessToken": "{{SNOWLUMA_TOKEN}}"
+  },
+  "ownerQQ": "{{OWNER_QQ}}",
+  "allow": {
+    "private": ["{{OWNER_QQ}}"],
+    "groups": []
+  },
+  "deny": { "private": [], "groups": [] },
+  "allowAllWhenEmpty": false,
+  "sessionCwd": "",
+  "agentPreset": "qq-chat-v2",
+  "workspaceTitle": "QQ 聊天",
+  "consolePort": 3100,
+
+  "passiveMode": true,
+  "sharedSession": { "enabled": true },
+  "handoff": { "enabled": true, "autoRotate": true, "rotateAboveBytes": 225280, "rotateEveryHours": 12, "validHours": 48 },
+  "crossChat": { "enabled": true, "includeCurrent": true, "maxLines": 10, "windowMs": 43200000, "exclude": [] },
+  "longMemory": { "enabled": true, "maxLines": 6, "summarizeEveryMessages": 40, "autoSummarize": true },
+  "dailyDiary": { "enabled": true, "time": "22:30" },
+  "dailyReport": { "enabled": true, "time": "09:00" },
+  "quietHours": { "enabled": true, "start": 1, "end": 6 },
+  "weeklyMessages": { "enabled": true, "list": [{ "weekday": 3, "time": "20:58", "text": "天地要塞" }] },
+  "gameStudy": { "enabled": true, "inject": true, "intervalHours": 8 },
+  "roleCard": { "fullEveryTurns": 8 },
+
+  "slang": {
+    "enabled": true,
+    "injectMax": 8,
+    "learnerModel": "deepseek-v4-flash",
+    "learnerEffort": "low",
+    "learnerRotateBytes": 81920,
+    "learnerRotateTasks": 3
+  },
+
+  "socialV2": {
+    "wake": {
+      "batchWindowMs": 3000,
+      "maxWakePerMinute": 6,
+      "maxWakePerHour": 8,
+      "preSleepWaitMs": 60000,
+      "probabilityCooldownMs": 1200000,
+      "triggers": { "probability": 0.05 }
+    },
+    "send": { "maxSendPerMinute": 2, "maxSendPerHour": 20 },
+    "proactive": { "enabled": false },
+    "sticker": { "enabled": true, "afterText": { "enabled": true, "probability": 0.35, "minGapMs": 120000 } }
+  }
+}

@@ -1,0 +1,301 @@
+--- a/src/mcp-snowluma-safe.js
++++ b/src/mcp-snowluma-safe.js
+@@ -902,6 +902,298 @@
+         return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+       } catch (error) {
+         return { content: [{ type: 'text', text: `发送表情失败：${error?.message ?? error}` }], isError: true };
++      }
++    }
++  );
++}
++
++// ── 长期记忆（跨会话，永久保存）────────────────────────────────────────────
++if (cfg.socialV2?.tools?.longMemory !== false) {
++  server.tool(
++    'qq_memory_remember',
++    '记一条【长期】记忆（跨会话永久保存，重启/换群都不会丢）：某人的长期偏好或身份、约定（几点开黑/约好做什么）、重要事件、群里的规矩或梗的来历。适合一句话就能说清的持久事实；不要记一次性的闲聊、情绪、图片内容，也不要记手机号/地址/密码这类隐私。',
++    {
++      key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
++      token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
++      text: z.string().describe('要记的一句话（第三人称陈述，20~60 字）'),
++      type: z.enum(['person', 'event', 'pref', 'fact', 'promise']).optional().describe('类型：人物/事件/偏好/事实/约定，默认 fact'),
++      tags: z.array(z.string()).optional().describe('标签，最多 5 个（人名、游戏名、话题）'),
++      importance: z.number().int().min(1).max(5).optional().describe('重要度 1~5，越可能长期有用越高，默认 3')
++    },
++    async ({ key, token, text, type, tags, importance }) => {
++      try {
++        const data = await agentApi('/api/memory/long', {
++          method: 'POST',
++          body: JSON.stringify({ key, text, type, tags, importance }),
++          headers: { 'x-agent-token': token }
++        });
++        return { content: [{ type: 'text', text: `记住了 ✓（当前共 ${data?.total ?? '?'} 条长期记忆）` }] };
++      } catch (error) {
++        return { content: [{ type: 'text', text: `记忆失败：${error?.message ?? error}` }], isError: true };
++      }
++    }
++  );
++
++  server.tool(
++    'qq_memory_recall',
++    '翻长期记忆：按关键词找人/事/约定（不传关键词就按最近更新返回）。想知道“这个人以前说过啥”“我们约好过什么”时用。',
++    {
++      key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
++      token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
++      query: z.string().optional().describe('关键词：人名、游戏名、话题，可留空'),
++      limit: z.number().int().min(1).max(30).optional().describe('最多几条，默认 10')
++    },
++    async ({ key, token, query, limit }) => {
++      try {
++        const q = new URLSearchParams({ limit: String(limit ?? 10) });
++        if (query) q.set('q', String(query));
++        const data = await agentApi(`/api/memory/long?${q.toString()}`, { headers: { 'x-agent-token': token } });
++        const list = Array.isArray(data?.entries) ? data.entries : [];
++        if (!list.length) return { content: [{ type: 'text', text: '没有相关的长期记忆（可以正常问对方，别硬编）' }] };
++        const label = { person: '人物', event: '事件', pref: '偏好', fact: '事实', promise: '约定' };
++        const lines = list.map((m, i) => {
++          const when = new Date(Number(m.lastTs) || Number(m.ts) || Date.now()).toLocaleDateString('zh-CN');
++          return `${i + 1}. [${label[m.type] ?? '记忆'} ${when}] ${m.text}`;
++        });
++        return { content: [{ type: 'text', text: `长期记忆（共 ${data.total} 条，显示 ${list.length} 条）：\n${lines.join('\n')}` }] };
++      } catch (error) {
++        return { content: [{ type: 'text', text: `翻记忆失败：${error?.message ?? error}` }], isError: true };
++      }
++    }
++  );
++}
++
++// ── QQ 空间（不需要模拟器：直接走网关的 qzone 接口）────────────────────────
++// 为什么放在桥接侧：手机/模拟器只负责“看屏幕”，空间操作走 QQ 账号自身的接口更稳，
++// 也不受模拟器没登录 QQ 的影响。
++const QZONE_LIKE_LIMIT = { perMinute: 3, perDay: 20, hits: [] };
++const QZONE_COMMENT_LIMIT = { per10Min: 1, perDay: 3, hits: [] };
++const QZONE_VISIT_LIMIT = { per3Min: 5, perDay: 40, hits: [] };
++const QZONE_POST_LIMIT = { per30Min: 1, perDay: 2, hits: [] };
++
++function qzoneLimit(kind) {
++  const now = Date.now();
++  if (kind === 'like') {
++    QZONE_LIKE_LIMIT.hits = QZONE_LIKE_LIMIT.hits.filter((t) => now - t < 24 * 3600 * 1000);
++    if (QZONE_LIKE_LIMIT.hits.filter((t) => now - t < 60000).length >= QZONE_LIKE_LIMIT.perMinute) {
++      return '【限流】点赞每分钟最多 3 次，等一会儿再来';
++    }
++    if (QZONE_LIKE_LIMIT.hits.length >= QZONE_LIKE_LIMIT.perDay) return '【限流】今天点赞次数用完了';
++    QZONE_LIKE_LIMIT.hits.push(now);
++    return null;
++  }
++  if (kind === 'comment') {
++    QZONE_COMMENT_LIMIT.hits = QZONE_COMMENT_LIMIT.hits.filter((t) => now - t < 24 * 3600 * 1000);
++    if (QZONE_COMMENT_LIMIT.hits.filter((t) => now - t < 10 * 60 * 1000).length >= QZONE_COMMENT_LIMIT.per10Min) {
++      return '【限流】评论每 10 分钟最多 1 条（发出去撤不回，宁可少发）';
++    }
++    if (QZONE_COMMENT_LIMIT.hits.length >= QZONE_COMMENT_LIMIT.perDay) return '【限流】今天评论次数用完了';
++    QZONE_COMMENT_LIMIT.hits.push(now);
++    return null;
++  }
++  if (kind === 'post') {
++    QZONE_POST_LIMIT.hits = QZONE_POST_LIMIT.hits.filter((t) => now - t < 24 * 3600 * 1000);
++    if (QZONE_POST_LIMIT.hits.filter((t) => now - t < 30 * 60 * 1000).length >= QZONE_POST_LIMIT.per30Min) {
++      return '【限流】说说每 30 分钟最多 1 条，别刷屏';
++    }
++    if (QZONE_POST_LIMIT.hits.length >= QZONE_POST_LIMIT.perDay) return '【限流】今天说说条数用完了（每天最多 3 条）';
++    QZONE_POST_LIMIT.hits.push(now);
++    return null;
++  }
++  QZONE_VISIT_LIMIT.hits = QZONE_VISIT_LIMIT.hits.filter((t) => now - t < 24 * 3600 * 1000);
++  if (QZONE_VISIT_LIMIT.hits.filter((t) => now - t < 3 * 60 * 1000).length >= QZONE_VISIT_LIMIT.per3Min) {
++    return '【限流】翻空间翻太快会被 QQ 风控，3 分钟最多看 5 个人，歇会儿';
++  }
++  if (QZONE_VISIT_LIMIT.hits.length >= QZONE_VISIT_LIMIT.perDay) return '【限流】今天逛空间到上限了';
++  QZONE_VISIT_LIMIT.hits.push(now);
++  return null;
++}
++
++function htmlToText(html) {
++  return String(html ?? '')
++    .replace(/<br\s*\/?>/gi, ' ')
++    .replace(/<[^>]+>/g, '')
++    .replace(/&nbsp;/gi, ' ')
++    .replace(/&amp;/gi, '&')
++    .replace(/&lt;/gi, '<')
++    .replace(/&gt;/gi, '>')
++    .replace(/&quot;/gi, '"')
++    .replace(/\s+/g, ' ')
++    .trim();
++}
++
++if (cfg.socialV2?.tools?.qzone !== false) {
++  server.tool(
++    'qq_qzone_feeds',
++    '看 QQ 空间【好友动态】（含主人发的说说）。要给谁点赞/评论，先调这个拿 tid，再用 qq_qzone_like / qq_qzone_comment。不需要用户给链接。',
++    {
++      count: z.number().int().min(1).max(20).default(8).describe('看几条，默认 8'),
++      page: z.number().int().min(1).max(5).default(1).describe('第几页，默认 1'),
++    },
++    async ({ count, page }) => {
++      const blocked = qzoneLimit('visit');
++      if (blocked) return { content: [{ type: 'text', text: blocked }], isError: true };
++      try {
++        const data = await onebot('get_qzone_feeds', { page_num: page, count });
++        const list = Array.isArray(data) ? data : (data?.feeds ?? data?.msglist ?? data?.list ?? []);
++        if (!list.length) return { content: [{ type: 'text', text: `没取到好友动态：${JSON.stringify(data ?? {}).slice(0, 300)}` }] };
++        const lines = list.slice(0, count).map((x, i) => {
++          const who = x.nickname || x.name || x.uin || '?';
++          const txt = htmlToText(x.html ?? x.content ?? x.summary ?? '').slice(0, 80);
++          const pics = (x.pic || x.images || []).length;
++          const likeN = x.like_count ?? x.likenum ?? 0;
++          const cmtN = x.comment_count ?? x.cmtenum ?? 0;
++          return `${i + 1}. [tid=${x.key ?? x.tid ?? '?'}] [uin=${x.uin ?? '?'}] [abstime=${x.time ?? x.abstime ?? ''}] ${who}：${txt || '(无文字，可能是图片说说)'}${pics ? `（${pics}图）` : ''} 赞${likeN} 评${cmtN}`;
++        });
++        return { content: [{ type: 'text', text: `好友动态（第 ${page} 页，${list.length} 条）：\n${lines.join('\n')}` }] };
++      } catch (error) {
++        return { content: [{ type: 'text', text: `看好友动态失败：${error?.message ?? error}` }], isError: true };
++      }
++    }
++  );
++
++  server.tool(
++    'qq_qzone_my_posts',
++    '看你自己的 QQ 空间说说列表（发出去没 / 回顾自己发过什么）。',
++    { num: z.number().int().min(1).max(20).default(5).describe('看几条，默认 5') },
++    async ({ num }) => {
++      try {
++        const data = await onebot('get_qzone_msg_list', { num });
++        const list = Array.isArray(data) ? data : (data?.msglist ?? data?.list ?? []);
++        if (!list.length) return { content: [{ type: 'text', text: `没取到说说：${JSON.stringify(data ?? {}).slice(0, 200)}` }] };
++        const lines = list.slice(0, num).map((x, i) => {
++          const t = x.content || x.summary || '';
++          return `${i + 1}. [tid=${x.tid ?? '?'}] ${String(t).slice(0, 70)}  赞${x.like_count ?? x.likenum ?? 0} 评${x.comment_count ?? x.cmtenum ?? 0}`;
++        });
++        return { content: [{ type: 'text', text: `你的说说（共 ${data?.total ?? list.length} 条）：\n${lines.join('\n')}` }] };
++      } catch (error) {
++        return { content: [{ type: 'text', text: `看说说失败：${error?.message ?? error}` }], isError: true };
++      }
++    }
++  );
++
++  server.tool(
++    'qq_qzone_user_posts',
++    '看【指定的人】的空间说说（群友也行）：传 QQ 号即可，不用链接。拿到 tid 后可点赞/评论。对方设了权限会失败，属正常。',
++    {
++      targetUin: z.union([z.number(), z.string()]).describe('要看的人的 QQ 号'),
++      num: z.number().int().min(1).max(20).default(5).describe('看几条，默认 5'),
++    },
++    async ({ targetUin, num }) => {
++      const blocked = qzoneLimit('visit');
++      if (blocked) return { content: [{ type: 'text', text: blocked }], isError: true };
++      try {
++        const data = await onebot('get_qzone_msg_list', { target_uin: Number(targetUin), num });
++        const list = Array.isArray(data) ? data : (data?.msglist ?? data?.list ?? []);
++        if (!list.length) {
++          return { content: [{ type: 'text', text: `没取到说说（对方可能没开空间/设了权限/最近没发）` }] };
++        }
++        const lines = list.slice(0, num).map((x, i) => {
++          const txt = htmlToText(x.content ?? x.summary ?? '').slice(0, 70);
++          return `${i + 1}. [tid=${x.tid ?? '?'}] ${txt || '(无文字)'}  赞${x.like_count ?? 0} 评${x.comment_count ?? 0}`;
++        });
++        return { content: [{ type: 'text', text: `QQ ${targetUin} 的说说（${list.length} 条）：\n${lines.join('\n')}` }] };
++      } catch (error) {
++        const msg = String(error?.message ?? error);
++        if (msg.includes('-10031') || msg.includes('保密') || msg.includes('没有权限')) {
++          return { content: [{ type: 'text', text: '对方空间设了权限，看不了（正常，别反复试同一个）' }], isError: true };
++        }
++        return { content: [{ type: 'text', text: `看对方空间失败：${msg.slice(0, 160)}` }], isError: true };
++      }
++    }
++  );
++
++  server.tool(
++    'qq_qzone_post',
++    '发一条 QQ 空间说说（自己的动态）。可以纯文字，也可以带图（http(s) 图片链接，最多 9 张）。限额：每 30 分钟 1 条、每天 3 条。内容要像真人随手发的：短、口语、有具体事；不要营销腔、不要长篇、不要每天都发。',
++    {
++      content: z.string().describe('说说正文（尽量 80 字以内，口语化）'),
++      images: z.array(z.string()).optional().describe('配图：http(s) 图片链接，最多 9 张'),
++    },
++    async ({ content, images }) => {
++      const blocked = qzoneLimit('post');
++      if (blocked) return { content: [{ type: 'text', text: blocked }], isError: true };
++      const text = String(content ?? '').trim();
++      if (!text) return { content: [{ type: 'text', text: '说说内容不能为空' }], isError: true };
++      const pics = Array.isArray(images) ? images.filter((u) => /^https?:\/\//i.test(String(u))).slice(0, 9) : [];
++      try {
++        const payload = pics.length ? { content: text, images: pics } : { content: text };
++        await onebot('send_qzone_msg', payload);
++        return { content: [{ type: 'text', text: `说说已发出 ✓（${pics.length ? `${pics.length} 张图` : '纯文字'}）` }] };
++      } catch (error) {
++        return { content: [{ type: 'text', text: `发说说失败：${error?.message ?? error}` }], isError: true };
++      }
++    }
++  );
++
++  server.tool(
++    'qq_qzone_like',
++    '给一条 QQ 空间说说点赞。tid/uin/abstime 从 qq_qzone_feeds 里拿。限额：每分钟 3 次、每天 20 次。',
++    {
++      tid: z.string().describe('说说的 tid（来自 qq_qzone_feeds）'),
++      targetUin: z.union([z.number(), z.string()]).optional().describe('说说主人的 QQ 号（来自 feeds 里的 uin）'),
++      abstime: z.union([z.number(), z.string()]).optional().describe('发布时间戳（来自 feeds 里的 abstime）'),
++    },
++    async ({ tid, targetUin, abstime }) => {
++      const blocked = qzoneLimit('like');
++      if (blocked) return { content: [{ type: 'text', text: blocked }], isError: true };
++      try {
++        const payload = { tid: String(tid) };
++        if (targetUin) payload.target_uin = Number(targetUin);
++        if (abstime) payload.abstime = Number(abstime);
++        await onebot('like_qzone', payload);
++        return { content: [{ type: 'text', text: `点赞成功 ✓（tid=${tid}）` }] };
++      } catch (error) {
++        return { content: [{ type: 'text', text: `点赞失败：${error?.message ?? error}` }], isError: true };
++      }
++    }
++  );
++
++  server.tool(
++    'qq_qzone_comment',
++    '评论一条 QQ 空间说说（严格限流：每 10 分钟 1 条、每天 3 条，因为发出去撤不回）。想表达喜欢优先用 qq_qzone_like。',
++    {
++      tid: z.string().describe('说说的 tid（来自 qq_qzone_feeds）'),
++      content: z.string().describe('评论内容，短一点更像真人'),
++      targetUin: z.union([z.number(), z.string()]).optional().describe('说说主人的 QQ 号'),
++    },
++    async ({ tid, content, targetUin }) => {
++      const blocked = qzoneLimit('comment');
++      if (blocked) return { content: [{ type: 'text', text: blocked }], isError: true };
++      try {
++        const payload = { tid: String(tid), content: String(content).slice(0, 100) };
++        if (targetUin) payload.target_uin = Number(targetUin);
++        await onebot('comment_qzone', payload);
++        return { content: [{ type: 'text', text: `评论成功 ✓（tid=${tid}）` }] };
++      } catch (error) {
++        return { content: [{ type: 'text', text: `评论失败：${error?.message ?? error}` }], isError: true };
++      }
++    }
++  );
++}
++
++if (cfg.socialV2?.tools?.sendImage !== false) {
++  server.tool(
++    'qq_send_image',
++    '把你“看到”的一张截图/图片发到 QQ 会话里（可选同时 @ 某人）。url 必须是手机工具 phone_screenshot 返回的那种图源地址（http://127.0.0.1:8898/xxx.jpg），其它地址会被拒绝。发图是一张单独的气泡，想配文字请用 qq_send_message 另外发一条；真人不会每张图都配长文。看到真正有意思的画面才发，别刷屏、别连续发图。',
++    {
++      key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
++      token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
++      url: z.string().describe('图片地址，来自 phone_screenshot 返回的图源（形如 http://127.0.0.1:8898/shot-xxx.jpg）'),
++      atUserId: z.union([z.number(), z.string()]).optional().describe('要 @ 的群成员 QQ 号（群聊可选，私聊不可用）'),
++      replyToMessageId: z.union([z.number(), z.string()]).optional().describe('要引用/回复的消息 id（可选）')
++    },
++    async ({ key, token, url, atUserId, replyToMessageId }) => {
++      try {
++        const data = await agentApi('/api/socialV2/send-image', {
++          method: 'POST',
++          body: JSON.stringify({ key, url: String(url), atUserId: atUserId ?? null, replyToMessageId }),
++          headers: { 'x-agent-token': token },
++          timeoutMs: 300000
++        });
++        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
++      } catch (error) {
++        return { content: [{ type: 'text', text: `发送图片失败：${error?.message ?? error}` }], isError: true };
+       }
+     }
+   );

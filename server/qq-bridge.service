@@ -1,0 +1,15 @@
+[Unit]
+Description=QQ bridge (qq-bridge)
+After=network.target docker.service dsh-web.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/qq-bridge
+ExecStart=/usr/bin/node src/bridge.js
+Restart=always
+RestartSec=8
+Environment=NPM_CONFIG_REGISTRY=https://registry.npmmirror.com
+Environment=NODE_OPTIONS=--max-old-space-size=320
+
+[Install]
+WantedBy=multi-user.target

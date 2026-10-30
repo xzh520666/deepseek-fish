@@ -1,0 +1,71 @@
+# 把这个文件的内容合并进 /root/.dsh/profiles/web/cordis.patch.yml
+# 作用：给 DSH 挂上 qq-bridge 提供的几个 MCP 工具
+#
+# 注意：{{SNOWLUMA_TOKEN}} 之类占位符要在实际使用时替换成真值（或删掉对应项）。
+
+# 启用 HMR 服务（dsh web 的用户补丁层监听需要它）
+- id: hmr
+  disabled: false
+  config:
+    root:
+      - .
+
+# 让 DSH 知道模型的真实上下文窗口。
+# 不配的话插件会退回到 100 万 token 的默认值，永远不触发自动压缩，
+# 于是会话一路涨到模型真实上限，然后 API 返回 HTTP 400。
+- id: llm-deepseek
+  config:
+    defaultContextWindow: 128000
+
+# === qq-bridge MCP BEGIN ===
+- insert:
+    - id: mcp-snowluma
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: snowluma
+        transport: stdio
+        command: '/usr/bin/node'
+        args:
+          - '/opt/qq-bridge/src/mcp-snowluma-safe.js'
+        toolCallTimeoutMs: 725000
+- insert:
+    - id: mcp-snowluma-host
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: snowluma-host
+        transport: stdio
+        command: '/usr/bin/node'
+        args:
+          - '/opt/qq-bridge/src/mcp-host-server.js'
+- insert:
+    - id: mcp-web-search-safe
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: web-search-safe
+        transport: stdio
+        command: '/usr/bin/node'
+        args:
+          - '/opt/qq-bridge/src/mcp-web-search-safe.js'
+# === qq-bridge MCP END ===
+
+# === diary MCP（自研：让机器人能写日记）===
+- insert:
+    - id: mcp-diary
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: diary
+        transport: stdio
+        command: '/usr/bin/node'
+        args:
+          - '/opt/diary-mcp/diary-mcp.js'
+
+# === phone MCP（可选：电脑上的模拟器，经反向隧道暴露）===
+# 不用手机能力就整段删掉
+- insert:
+    - id: mcp-phone
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: phone
+        transport: streamable-http
+        url: 'http://127.0.0.1:8899/mcp'
+        toolCallTimeoutMs: 180000

@@ -1,0 +1,22 @@
+--- a/src/sticker-lib.js
++++ b/src/sticker-lib.js
+@@ -137,7 +137,18 @@
+       })
+     : list;
+   const max = Math.max(1, Math.min(500, Number(limit) || 48));
+-  const items = filtered.slice(0, max).map((e) => ({
++  // 随机打散：不能总让 AI 看到前几张（否则永远只发那几张）。
++  // 权重偏向“很久没用过”的表情，同时保留一点纯随机性。
++  const now = Date.now();
++  const shuffled = filtered
++    .map((e) => {
++      const idleHours = Math.max(0, (now - (Number(e.lastUsedAt) || 0)) / 3600000);
++      const weight = 1 + Math.min(24, idleHours);
++      return { e, score: -Math.log(Math.random() + 1e-9) / weight };
++    })
++    .sort((a, b) => b.score - a.score)
++    .map((x) => x.e);
++  const items = shuffled.slice(0, max).map((e) => ({
+     id: e.id,
+     resId: e.resId,
+     md5: e.md5,

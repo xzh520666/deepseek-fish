@@ -1,0 +1,15 @@
+[Unit]
+Description=DeepSeek Harness web server (port 3080)
+After=network.target docker.service
+
+[Service]
+Type=simple
+WorkingDirectory=/root
+ExecStart=/usr/bin/dsh web --port 3080 --no-open
+Restart=always
+RestartSec=5
+Environment=NPM_CONFIG_REGISTRY=https://registry.npmmirror.com
+Environment=NODE_OPTIONS=--max-old-space-size=320
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,1714 @@
+--- a/src/bridge.js
++++ b/src/bridge.js
+@@ -6,6 +6,7 @@
+ //
+ // 用法：node src/bridge.js （先编辑 ../config.json）
+ import fs from 'node:fs';
++import os from 'node:os';
+ import http from 'node:http';
+ import path from 'node:path';
+ import crypto from 'node:crypto';
+@@ -766,8 +767,62 @@
+     return entry;
+   }
+ 
++  // 发完文字后按概率补一张收藏表情。
++  // 规则：间隔足够久、且随机挑（很久没用过的权重更高，不会老发前几张）。
++  const lastAutoStickerAt = new Map();
++  async function maybeAutoStickerV2(key) {
++    const conf = cfg.socialV2?.sticker?.afterText ?? {};
++    if (cfg.socialV2?.sticker?.enabled === false) return;
++    if (conf.enabled === false) return;
++    const prob = Number(conf.probability ?? 0.35);
++    if (!(Math.random() < prob)) return;
++    const gapMs = Number(conf.minGapMs ?? 120000);
++    const last = lastAutoStickerAt.get(key) ?? 0;
++    if (Date.now() - last < gapMs) return;
++    const synced = await syncStickerLibrary(false);
++    const list = synced?.entries ?? stickerEntries;
++    if (!Array.isArray(list) || !list.length) return;
++    const now = Date.now();
++    const weighted = list.map((e) => {
++      const idleHours = Math.max(0, (now - (Number(e.lastUsedAt) || 0)) / 3600000);
++      return { e, w: 1 + Math.min(24, idleHours) };
++    });
++    const total = weighted.reduce((a, x) => a + x.w, 0);
++    let roll = Math.random() * total;
++    let picked = weighted[0].e;
++    for (const x of weighted) {
++      roll -= x.w;
++      if (roll <= 0) { picked = x.e; break; }
++    }
++    lastAutoStickerAt.set(key, Date.now());
++    try {
++      await sendStickerV2(key, picked.resId || picked.id || picked.md5);
++      log(`[sticker] 自动补图 ${key}: ${picked.desc || picked.localNote || picked.id}`);
++      appendActivity(`${key} [sticker] 自动补一张表情`);
++    } catch (error) {
++      log('[sticker] 自动补图失败:', error?.message ?? error);
++    }
++  }
++
+   // 发送一个收藏表情（按 emoji_id/url/md5 解析，发图片段）。
+   async function sendStickerV2(key, stickerRef, options = {}) {
++    // 允许 AI 直接说 "随机"：从库里随机挑一张（很久没用的权重更高）
++    if (['random', '随机', 'any', ''].includes(String(stickerRef ?? '').trim().toLowerCase())) {
++      const synced0 = await syncStickerLibrary(false);
++      const pool = (synced0?.entries ?? stickerEntries).filter((e) => e && (e.resId || e.id));
++      if (pool.length) {
++        const now0 = Date.now();
++        const weighted0 = pool.map((e) => {
++          const idle = Math.max(0, (now0 - (Number(e.lastUsedAt) || 0)) / 3600000);
++          return { e, w: 1 + Math.min(24, idle) };
++        });
++        const total0 = weighted0.reduce((a, x) => a + x.w, 0);
++        let roll0 = Math.random() * total0;
++        let picked0 = weighted0[0].e;
++        for (const x of weighted0) { roll0 -= x.w; if (roll0 <= 0) { picked0 = x.e; break; } }
++        stickerRef = picked0.resId || picked0.id || picked0.md5;
++      }
++    }
+     // 发送前强制同步一次，确保“刚新增的表情能立即用、刚删除的表情不会继续发”。
+     const synced = await syncStickerLibrary(true);
+     const entry = findSticker(synced?.entries ?? stickerEntries, stickerRef);
+@@ -790,15 +845,28 @@
+       if (!/^\d+$/.test(at)) throw new Error('atUserId 必须是正整数 QQ 号，且不能为 all');
+       segments.push({ type: 'at', data: { qq: at } });
+     }
+-    // 发送前校验表情 URL 必须是公网 http(s)，防止本地库被污染后诱导 OneBot 抓取内网/本机地址。
+-    try {
+-      await validateFetchUrl(url);
+-    } catch (error) {
+-      throw new Error(`表情 ${entry.id} 的图片地址不合法，已拒绝发送：${error?.message ?? error}`);
+-    }
+-    segments.push({ type: 'image', data: { file: url } });
+-    const action = kind === 'private' ? 'send_private_msg' : 'send_group_msg';
+-    const params = kind === 'private' ? { user_id: Number(id), message: segments } : { group_id: Number(id), message: segments };
++    // 收藏表情要用 QQ 的「自定义表情」通道发（send_custom_face），
++    // 否则就是一张普通图片，没有动画/表情气泡。emoji_id 用表情库里的 resId。
++    const customEmojiId = String(entry.resId || entry.id || '').trim();
++    const canCustomFace = segments.length === 0 && /^\d+_0_0_0_[0-9A-Fa-f]{32}_0_0$/.test(customEmojiId);
++    let action;
++    let params;
++    if (canCustomFace) {
++      action = 'send_custom_face';
++      params = kind === 'private'
++        ? { user_id: Number(id), emoji_id: customEmojiId }
++        : { group_id: Number(id), emoji_id: customEmojiId };
++    } else {
++      // 需要同时 @ / 引用时，send_custom_face 带不了这些，退回图片气泡（能引用但显示为图片）
++      try {
++        await validateFetchUrl(url);
++      } catch (error) {
++        throw new Error(`表情 ${entry.id} 的图片地址不合法，已拒绝发送：${error?.message ?? error}`);
++      }
++      segments.push({ type: 'image', data: { file: url } });
++      action = kind === 'private' ? 'send_private_msg' : 'send_group_msg';
++      params = kind === 'private' ? { user_id: Number(id), message: segments } : { group_id: Number(id), message: segments };
++    }
+     const httpUrl = String(cfg.snowluma?.httpUrl || 'http://127.0.0.1:3000').replace(/\/+$/, '');
+     // 与文本发送共用 sendChain，保证“先文字后表情”的真人顺序不被并发工具调用打乱。
+     let sendResolve;
+@@ -838,6 +906,100 @@
+     return { entry: updated.entry, messageId: data?.message_id ?? null };
+   }
+ 
++  // 图源白名单：只允许本机的手机截图服务（默认 http://127.0.0.1:8898/），
++  // 防止被诱导让 OneBot/服务器去抓内网其它端口或任意地址。
++  function imageSourcePrefixes() {
++    const list = cfg.socialV2?.image?.allowUrlPrefixes;
++    return Array.isArray(list) && list.length ? list.map(String) : ['http://127.0.0.1:8898/'];
++  }
++
++  function validateImageSourceUrl(raw) {
++    let u;
++    try {
++      u = new URL(raw);
++    } catch {
++      throw new Error('url 格式不合法');
++    }
++    if (u.protocol !== 'http:') throw new Error('图源只支持 http');
++    const full = u.toString();
++    if (!imageSourcePrefixes().some((prefix) => full.startsWith(prefix))) {
++      throw new Error(`图源不在允许范围内（仅允许 ${imageSourcePrefixes().join(' , ')}）`);
++    }
++  }
++
++  // 发送一张图片（图源必须是受信任的本地服务，例如电脑上的手机截图服务）。
++  // 图片在服务器侧取回后以 base64 交给 OneBot，避免把图源地址暴露给网关容器。
++  async function sendImageV2(key, options = {}) {
++    const rawUrl = String(options.url ?? '').trim();
++    if (!rawUrl) throw new Error('url 不能为空');
++    validateImageSourceUrl(rawUrl);
++    let buf;
++    try {
++      const res = await fetch(rawUrl, { signal: AbortSignal.timeout(20000) });
++      if (!res.ok) throw new Error(`图源返回 HTTP ${res.status}`);
++      buf = Buffer.from(await res.arrayBuffer());
++    } catch (error) {
++      throw new Error(`取图失败：${error?.message ?? error}`);
++    }
++    if (!buf?.length) throw new Error('图源返回空内容');
++    const maxBytes = Number(cfg.socialV2?.image?.maxBytes) || 4 * 1024 * 1024;
++    if (buf.length > maxBytes) {
++      throw new Error(`图片过大：${Math.round(buf.length / 1024)}KB（上限 ${Math.round(maxBytes / 1024)}KB）`);
++    }
++    const mimeType = mimeFromBuffer(buf);
++    if (!String(mimeType).startsWith('image/')) throw new Error('图源内容不是图片');
++
++    const [kind, id] = key.split(':');
++    const segments = [];
++    const replyToMessageId = options.replyToMessageId;
++    const atUserId = options.atUserId;
++    if (replyToMessageId !== undefined && replyToMessageId !== null && String(replyToMessageId).trim() !== '') {
++      const rid = String(replyToMessageId).trim();
++      if (!/^-?[1-9]\d*$/.test(rid)) throw new Error('replyToMessageId 必须是非零整数（消息 id 可能为负数）');
++      segments.push({ type: 'reply', data: { id: rid } });
++    }
++    if (atUserId !== undefined && atUserId !== null && String(atUserId).trim() !== '') {
++      const at = String(atUserId).trim();
++      if (!/^\d+$/.test(at)) throw new Error('atUserId 必须是正整数 QQ 号，且不能为 all');
++      segments.push({ type: 'at', data: { qq: at } });
++    }
++    segments.push({ type: 'image', data: { file: `base64://${buf.toString('base64')}` } });
++
++    const action = kind === 'private' ? 'send_private_msg' : 'send_group_msg';
++    const params = kind === 'private' ? { user_id: Number(id), message: segments } : { group_id: Number(id), message: segments };
++    const httpUrl = String(cfg.snowluma?.httpUrl || 'http://127.0.0.1:3000').replace(/\/+$/, '');
++    // 与文字/表情共用 sendChain，保证真人顺序不被打乱。
++    let sendResolve;
++    let sendReject;
++    const sendResult = new Promise((resolve, reject) => {
++      sendResolve = resolve;
++      sendReject = reject;
++    });
++    sendChain = sendChain.then(async () => {
++      try {
++        await sleep(randInt(600, 1600));
++        const res = await fetch(`${httpUrl}/${action}`, {
++          method: 'POST',
++          headers: {
++            'content-type': 'application/json',
++            ...(cfg.snowluma?.accessToken ? { authorization: `Bearer ${cfg.snowluma.accessToken}` } : {})
++          },
++          body: JSON.stringify(params),
++          signal: AbortSignal.timeout(45000)
++        });
++        const body = await res.json().catch(() => ({}));
++        if (!res.ok || body.status !== 'ok' || body.retcode !== 0) {
++          throw new Error(`OneBot ${action} 失败: ${body.wording || body.retcode || res.status}`);
++        }
++        sendResolve(body.data);
++      } catch (error) {
++        sendReject(error);
++      }
++    });
++    const data = await sendResult;
++    return { messageId: data?.message_id ?? null, bytes: buf.length, mimeType };
++  }
++
+   // 更新本地 AI 认知（含义/标签/用法）。
+   function applyStickerNoteV2(stickerId, note, tags, usage) {
+     const patch = {};
+@@ -928,12 +1090,14 @@
+   async function ensureSlangLearnerSession() {
+     if (slangLearnerSessionId) {
+       learnerSessions.add(slangLearnerSessionId);
++      void ensureLearnerModel(slangLearnerSessionId);
+       return slangLearnerSessionId;
+     }
+     const saved = readJsonSafe(SLANG_SESSION_FILE, null);
+     if (saved?.sessionId) {
+       slangLearnerSessionId = String(saved.sessionId);
+       learnerSessions.add(slangLearnerSessionId);
++      void ensureLearnerModel(slangLearnerSessionId);
+       return slangLearnerSessionId;
+     }
+     const dir = path.join(STATE_DIR, 'slang-agent');
+@@ -951,6 +1115,7 @@
+     learnerSessions.add(slangLearnerSessionId);
+     fs.mkdirSync(STATE_DIR, { recursive: true });
+     atomicWriteJson(SLANG_SESSION_FILE, { sessionId: slangLearnerSessionId });
++    void ensureLearnerModel(slangLearnerSessionId);
+     log(`黑话学习会话已创建：${slangLearnerSessionId}`);
+     return slangLearnerSessionId;
+   }
+@@ -964,6 +1129,36 @@
+       learnerSessions.delete(oldId);
+     }
+     try { fs.unlinkSync(SLANG_SESSION_FILE); } catch {}
++  }
++
++  // 学习会话会不断累积 web 搜索结果，攒大了之后每次任务都要把整段上下文当“新输入”重发，
++  // 一次就能烧掉几十万 token（缓存命中不了）。所以任务跑几次/体积变大就换一条新的。
++  let learnerTasksSinceRotate = 0;
++  function learnerSessionFileSize(sessionId) {
++    try {
++      const root = path.join(process.env.DSH_HOME || path.join(os.homedir(), '.dsh'), 'sessions');
++      for (const ws of fs.readdirSync(root)) {
++        const f = path.join(root, ws, sessionId, 'session.jsonl.zstd');
++        try { return fs.statSync(f).size; } catch {}
++      }
++    } catch {}
++    return 0;
++  }
++
++  function maybeRotateLearnerSession() {
++    if (!slangLearnerSessionId) return;
++    learnerTasksSinceRotate += 1;
++    const sizeLimit = Number(cfg.slang?.learnerRotateBytes) || 80 * 1024;
++    const taskLimit = Number(cfg.slang?.learnerRotateTasks) || 3;
++    const size = learnerSessionFileSize(slangLearnerSessionId);
++    if (size > sizeLimit || learnerTasksSinceRotate >= taskLimit) {
++      const old = slangLearnerSessionId;
++      log(`[cost] 学习会话换新（体积 ${Math.round(size / 1024)}KB，已跑 ${learnerTasksSinceRotate} 个任务）`);
++      learnerTasksSinceRotate = 0;
++      invalidateSlangLearnerSession();
++      // 顺手归档旧会话，避免它在磁盘上继续堆积
++      try { void api.workspace.archiveSession({ sessionId: old }); } catch {}
++    }
+   }
+ 
+   function waitLearnerTurn(sessionId, timeoutMs = 120000) {
+@@ -982,6 +1177,54 @@
+     });
+   }
+ 
++  // ── 黑话质量过滤 ─────────────────────────────────────────────────────────
++  // 群里聊技术时会把 dsh / agent token / qq-chat-v2 / composition 这种词当成"黑话"抓进来，
++  // 这类不是群梗，进候选库只会污染。这里在提取阶段就挡掉，并在确认阶段用同一套规则清理。
++  const SLANG_JUNK_WORDS = new Set([
++    'dsh', 'agent', 'token', 'session', 'resume', 'bridge', 'mcp', 'api', 'json', 'yaml',
++    'node', 'npm', 'git', 'bash', 'shell', 'docker', 'linux', 'windows', 'prompt', 'model',
++    'plugin', 'config', 'composition', 'snowluma', 'qq-chat', 'qq-chat-v2', 'http', 'https',
++    'url', 'cpu', 'gpu', 'api key', 'old space', 'workspace'
++  ]);
++
++  function looksLikeJunkSlang(content) {
++    const t = String(content ?? '').trim();
++    if (!t) return true;
++    if (t.length > 16) return true;
++    // 纯标点/符号（例如 ".。。"）
++    if (/^[\s\p{P}\p{S}]+$/u.test(t)) return true;
++    // 纯 ASCII 的词再细分：命中技术词、含 - _ . 分隔、或过长英文，都不是群梗
++    if (/^[\x00-\x7F]+$/.test(t)) {
++      const lower = t.toLowerCase();
++      if (SLANG_JUNK_WORDS.has(lower)) return true;
++      if (/[-_.]/.test(t)) return true;
++      const words = lower.split(/\s+/).filter(Boolean);
++      if (words.length > 1 && words.every((w) => SLANG_JUNK_WORDS.has(w))) return true;
++      if (t.replace(/\s+/g, '').length >= 8) return true;
++    }
++    return false;
++  }
++
++  // 风险太高的词不自动确认。注意：很多解释会写“本身不敏感，但……”，
++  // 所以只匹配真正的危险词，不要一看到“敏感”就拦（会把正常梗误伤）。
++  const SLANG_RISK_RE = /(明确低俗|低俗|色情|性暗示|涉性|擦边|脏话|辱骂|人身攻击|政治敏感|涉政|违法|违规|歧视|地域黑|不雅)/;
++
++  function slangRiskUnsafe(risk) {
++    const r = String(risk ?? '');
++    if (!r) return false;
++    if (/不敏感|无风险|没有风险/.test(r) && !SLANG_RISK_RE.test(r.replace(/不敏感/g, ''))) return false;
++    return SLANG_RISK_RE.test(r.replace(/不敏感/g, ''));
++  }
++
++  function shouldAutoConfirmSlang(entry, minCount) {
++    if (!entry || entry.status !== SLANG_STATUS.CANDIDATE) return false;
++    if (!entry.meaning || !String(entry.meaning).trim()) return false;
++    if (Number(entry.count) < minCount) return false;
++    if (slangRiskUnsafe(entry.risk)) return false;
++    if (looksLikeJunkSlang(entry.content)) return false;
++    return true;
++  }
++
+   async function runSlangExtraction(key) {
+     if (cfg.slang?.enabled === false) return;
+     if (!dshReady) return;
+@@ -1014,12 +1257,15 @@
+       }
+       let added = 0;
+       let updated = 0;
++      let skippedJunk = 0;
+       const researchCandidates = [];
+       const thresholds = Array.isArray(cfg.slang?.inferenceThresholds) ? cfg.slang.inferenceThresholds.map(Number).filter(Boolean) : [2, 4, 8];
+       const seenContents = new Set();
+       for (const item of items) {
+         if (seenContents.has(item.content)) continue;
+         seenContents.add(item.content);
++        // 技术词/纯符号直接丢弃，不进候选库
++        if (looksLikeJunkSlang(item.content)) { skippedJunk += 1; continue; }
+         const idx = Number(item.source_id) - 1;
+         const src = Number.isInteger(idx) && idx >= 0 && idx < messages.length ? messages[idx] : null;
+         const evidence = src ? [{ key, sender: src.sender, text: src.text, time: src.time }] : [];
+@@ -1032,7 +1278,7 @@
+       const win = slangWindows.get(key) ?? [];
+       slangWindows.set(key, win.slice(messages.length));
+       saveSlangStore();
+-      log(`黑话提取：${key} 新增 ${added} 条，更新 ${updated} 条`);
++      log(`黑话提取：${key} 新增 ${added} 条，更新 ${updated} 条${skippedJunk ? `，丢弃技术/符号词 ${skippedJunk} 条` : ''}`);
+       if (researchCandidates.length && cfg.slang?.autoResearch !== false) {
+         queueSlangTask(() => runSlangResearch(researchCandidates));
+       }
+@@ -1085,6 +1331,14 @@
+         if (Array.isArray(r.sources) && r.sources.length) entry.sources = r.sources.map((s) => String(s ?? '').trim()).filter(Boolean).slice(0, 10);
+         entry.lastInferenceCount = entry.count;
+         entry.updatedAt = new Date().toISOString();
++        // 出现足够多次 + 有解释 + 不是高风险词 → 自动确认，才能真的注入提示里被用上
++        const autoMin = Math.max(1, Number(cfg.slang?.autoConfirmMinCount ?? 2));
++        if (shouldAutoConfirmSlang(entry, autoMin)) {
++          entry.status = SLANG_STATUS.CONFIRMED;
++          entry.confirmedAt = new Date().toISOString();
++          entry.confirmedBy = 'auto';
++          log(`黑话自动确认（出现 ${entry.count} 次且有解释）：${entry.content}`);
++        }
+       }
+       saveSlangStore();
+       log(`黑话研究：已更新 ${results.length} 条候选解释`);
+@@ -1808,6 +2062,100 @@
+           sendJson({ ok: true, rejectedCount });
+           return;
+         }
++        // 预览某个文本会匹配到哪些游戏功课（调试用）
++        if (req.method === 'GET' && url.pathname === '/api/games/digest') {
++          const text = String(url.searchParams.get('text') ?? '');
++          const matched = matchGames(text);
++          const digest = buildGamesDigest(text);
++          sendJson({ ok: true, text, matched, length: digest.length, digest });
++          return;
++        }
++        // 手动触发某个游戏的功课学习
++        if (req.method === 'POST' && url.pathname === '/api/games/study') {
++          const body = await readBody();
++          const game = String(body.game ?? '').trim();
++          const data = loadGames();
++          const names = Object.keys(data.games || {});
++          if (!names.length) { sendJson({ ok: false, error: '还没有游戏知识库' }, 400); return; }
++          const target = game && names.includes(game) ? game : names[0];
++          sendJson({ ok: true, queued: true, game: target });
++          queueSlangTask(() => runGameStudy(target));
++          return;
++        }        // 手动触发换线（先写交接摘要）
++        if (req.method === 'POST' && url.pathname === '/api/session/rotate') {
++          const body = await readBody();
++          const reason = String(body.reason ?? 'manual').slice(0, 60);
++          sendJson({ ok: true, queued: true, reason });
++          queueSlangTask(async () => {
++            await rotateSessionWithHandoff(`手动：${reason}`);
++            lastRotateAt = Date.now();
++          });
++          return;
++        }
++        // 手动触发写日记（管理员测试用）
++        if (req.method === 'POST' && url.pathname === '/api/diary/run') {
++          const d = diaryConfig();
++          scheduleWakeV2(d.key, 'dailyDiary');
++          appendActivity(`console [diary] 手动触发写日记 -> ${d.key}`);
++          sendJson({ ok: true, key: d.key, reason: 'dailyDiary' });
++          return;
++        }
++        // ── 长期记忆接口（QQ agent 通过 MCP 工具读写）────────────────────────
++        if (req.method === 'GET' && url.pathname === '/api/memory/long') {
++          const q = String(url.searchParams.get('q') ?? '').trim().toLowerCase();
++          const limit = Math.max(1, Math.min(50, Number(url.searchParams.get('limit')) || 20));
++          let list = longMemory.slice();
++          if (q) {
++            const grams = hanBigrams(q);
++            list = list.filter((m) => {
++              const t = String(m.text ?? '').toLowerCase();
++              if (t.includes(q)) return true;
++              for (const g of grams) if (t.includes(g)) return true;
++              return (m.tags ?? []).some((tag) => String(tag).toLowerCase().includes(q));
++            });
++          }
++          list.sort((a, b) => (Number(b.lastTs) || 0) - (Number(a.lastTs) || 0));
++          sendJson({ ok: true, total: list.length, entries: list.slice(0, limit) });
++          return;
++        }
++        if (req.method === 'POST' && url.pathname === '/api/memory/long') {
++          const body = await readBody();
++          const key = String(body.key ?? '').trim();
++          if (req.headers['x-agent-token'] && key && !agentTokenOk(key, req.headers['x-agent-token'])) {
++            sendJson({ ok: false, error: 'agent token 无效' }, 403);
++            return;
++          }
++          const rec = addLongMemory({
++            text: body.text,
++            type: body.type,
++            key,
++            tags: body.tags,
++            importance: body.importance,
++            source: key ? 'agent' : 'console'
++          });
++          if (!rec) { sendJson({ ok: false, error: '内容太短或为空，没有记录' }, 400); return; }
++          appendActivity(`${key || 'console'} [memory] 记了一条长期记忆：${String(rec.text).slice(0, 40)}`);
++          sendJson({ ok: true, entry: rec, total: longMemory.length });
++          return;
++        }
++        if (req.method === 'POST' && url.pathname === '/api/memory/long/summarize') {
++          const body = await readBody();
++          const key = String(body.key ?? '').trim();
++          if (!key) { sendJson({ ok: false, error: 'key 不能为空' }, 400); return; }
++          sendJson({ ok: true, queued: true, key });
++          queueMemoryTask(() => runMemorySummary(key));
++          return;
++        }
++        if (req.method === 'POST' && url.pathname === '/api/memory/long/forget') {          const body = await readBody();
++          const id = String(body.id ?? '').trim();
++          if (!id) { sendJson({ ok: false, error: 'id 不能为空' }, 400); return; }
++          const before = longMemory.length;
++          longMemory = longMemory.filter((m) => m.id !== id);
++          const removed = before - longMemory.length;
++          if (removed) saveLongMemory();
++          sendJson({ ok: removed > 0, removed, total: longMemory.length });
++          return;
++        }
+         const slangMatch = url.pathname.match(/^\/api\/slang\/([^/]+)(?:\/(confirm|reject))?$/);
+         if (req.method === 'PATCH' && slangMatch && !slangMatch[2]) {
+           const id = slangMatch[1];
+@@ -2198,7 +2546,7 @@
+           }
+           const isV2 = currentMode === 'reserved2';
+           const roleState = readRoleState();
+-          const roleLine = roleState.role ? `【当前角色】${roleState.role}（完整角色卡请调用 qq_get_prompt 查看）\n\n` : '';
++          const roleLine = roleCardBlockV2(key);
+           // 二代必须带会话令牌，否则 AI 调用任何 MCP 状态/发送工具都会被拒。
+           let tokenLine = '';
+           if (isV2) {
+@@ -2499,6 +2847,10 @@
+             listStickers: 'qq_list_stickers',
+             getStickerImage: 'qq_get_sticker_image',
+             sendSticker: 'qq_send_sticker',
++            sendImage: 'qq_send_image',
++            longMemoryRemember: 'qq_memory_remember',
++            longMemoryRecall: 'qq_memory_recall',
++            qzonePost: 'qq_qzone_post',
+             setStickerRemark: 'qq_set_sticker_remark',
+             stickerNote: 'qq_sticker_note',
+             collectSticker: 'qq_collect_sticker',
+@@ -2889,7 +3241,11 @@
+             saveSocialV2State();
+             log(`[reserved2] 工具分条发送 ${key}: 成功 ${sentMessages.length}/${messages.length} 条`);
+             appendActivity(`${key} [reserved2] 工具分条发送：成功 ${sentMessages.length}/${messages.length} 条`);
+-            if (sentMessages.length > 0) scheduleReplyCheckV2(key);
++            if (sentMessages.length > 0) {
++              scheduleReplyCheckV2(key);
++              // 发完文字之后偶尔补一张收藏表情（随机挑，不是老发前几张）
++              maybeAutoStickerV2(key).catch((error) => log('[sticker] 自动表情失败:', error?.message ?? error));
++            }
+             const burstHint = messages.length >= 3 ? '你已经连发了多条，确认是必要的吗？真人很少一口气补完。' : undefined;
+             const spaceWarn = findCjkSpaceWarning(messages);
+             const splitWarn = findSplitBoundaryWarning(messages);
+@@ -3343,6 +3699,105 @@
+           }
+           return;
+         }
++        // ── 发图片（图源：电脑上的手机截图服务） ─────────────────────────────
++        if (req.method === 'POST' && url.pathname === '/api/socialV2/send-image') {
++          const body = await readBody();
++          const key = String(body.key ?? '').trim();
++          const imageUrl = String(body.url ?? '').trim();
++          const replyToMessageId = body.replyToMessageId;
++          const atUserId = body.atUserId ?? null;
++          if (!key || !imageUrl) { sendJson({ ok: false, error: 'key 和 url 不能为空' }, 400); return; }
++          if (req.headers['x-agent-token'] && !agentTokenOk(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
++          if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
++          if (req.headers['x-agent-token'] && !v2ToolEnabled('sendImage')) { sendJson({ ok: false, error: '工具未启用：qq_send_image' }, 403); return; }
++          if (currentMode !== 'reserved2') { sendJson({ ok: false, error: '该接口仅 reserved2 模式可用' }, 403); return; }
++          if (!req.headers['x-agent-token']) { sendJson({ ok: false, error: 'reserved2 模式发送必须携带 agent token' }, 403); return; }
++          const keyMatch = /^(group|private):(\d+)$/.exec(key);
++          if (!keyMatch) { sendJson({ ok: false, error: 'key 格式应为 group:群号 或 private:QQ号' }, 400); return; }
++          const kind = keyMatch[1];
++          const id = Number(keyMatch[2]);
++          if (!Number.isFinite(id) || id <= 0 || !modeAllowed(key, kind, id, cfg, currentMode)) {
++            sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403);
++            return;
++          }
++          if (kind === 'private' && atUserId) { sendJson({ ok: false, error: '私聊不需要 @' }, 400); return; }
++          if (shouldBlockSilentReply(key)) { sendJson({ ok: false, error: '静默模式已开启，当前不允许发送' }, 403); return; }
++          if (replyToMessageId !== undefined && replyToMessageId !== null && String(replyToMessageId).trim() !== '' && !/^-?[1-9]\d*$/.test(String(replyToMessageId).trim())) {
++            sendJson({ ok: false, error: 'replyToMessageId 必须是非零整数（消息 id 可能为负数）' }, 400);
++            return;
++          }
++          let quotedInfo = null;
++          let actualReplyToMessageId = replyToMessageId;
++          if (replyToMessageId !== undefined && replyToMessageId !== null && String(replyToMessageId).trim() !== '') {
++            const stForReply = getSocialV2State(key);
++            const resolved = await resolveReplyTargetV2(stForReply, kind, id, String(replyToMessageId).trim());
++            if (!resolved) {
++              sendJson({ ok: false, error: '无法解析被引用消息，请确认 message id 正确且属于当前会话（可用 qq_get_message_detail 查看）' }, 400);
++              return;
++            }
++            quotedInfo = resolved.info;
++            actualReplyToMessageId = resolved.messageId;
++          }
++          const sendCfg = cfg.socialV2?.send ?? {};
++          const now = Date.now();
++          try {
++            const st = getSocialV2State(key);
++            const maxPerMinute = Number(sendCfg.maxSendPerMinute) || 0;
++            const maxPerHour = Number(sendCfg.maxSendPerHour) || 0;
++            const recentMinute = (st.sendTimes || []).filter((t) => now - t < 60000).length;
++            const recentHour = (st.sendTimes || []).filter((t) => now - t < 3600000).length;
++            if ((maxPerMinute > 0 && recentMinute + 1 > maxPerMinute) || (maxPerHour > 0 && recentHour + 1 > maxPerHour)) {
++              sendJson({ ok: false, error: '发送频率超限，请稍后再试' }, 429);
++              return;
++            }
++            st.sendTimes.push(now);
++            if (st.sendTimes.length > 500) st.sendTimes = st.sendTimes.slice(-500);
++            const sent = await sendImageV2(key, {
++              url: imageUrl,
++              replyToMessageId: actualReplyToMessageId,
++              atUserId
++            });
++            const text = `[图片:手机截图 ${Math.round(sent.bytes / 1024)}KB]`;
++            st.recentMessages.push({
++              messageId: sent.messageId ? String(sent.messageId) : null,
++              sender: '我',
++              text: text.slice(0, 200),
++              plain: text.slice(0, 200),
++              quoteTargetIsSelf: false,
++              isOwner: true,
++              ownerLabel: '我',
++              isSelf: true,
++              media: [],
++              hasMedia: true,
++              forwardIds: [],
++              hasForward: false,
++              imageSent: { url: imageUrl, bytes: sent.bytes, mimeType: sent.mimeType },
++              time: Date.now()
++            });
++            const recentLimit = Number(cfg.socialV2?.context?.recentLimit) || 100;
++            if (st.recentMessages.length > recentLimit) st.recentMessages.splice(0, st.recentMessages.length - recentLimit);
++            st.lastAiReplyAt = now;
++            st.lastActionAt = now;
++            st.wakeConfig.noActionCount = 0;
++            st.preSleepWaitSatisfiedAt = 0;
++            st.preSleepWaitObservedAt = 0;
++            st.preSleepWaitAccumMs = 0;
++            saveSocialV2State();
++            scheduleReplyCheckV2(key);
++            log(`[image] 工具发送图片 ${key}: ${Math.round(sent.bytes / 1024)}KB ${atUserId ? `@${atUserId}` : ''}`);
++            appendActivity(`${key} [image] 工具发送截图 ${Math.round(sent.bytes / 1024)}KB`);
++            sendJson({ ok: true, key, messageId: sent.messageId, bytes: sent.bytes, mimeType: sent.mimeType, quoted: quotedInfo });
++          } catch (error) {
++            const st = getSocialV2State(key);
++            const idx = st.sendTimes.indexOf(now);
++            if (idx >= 0) st.sendTimes.splice(idx, 1);
++            if (st.sendTimes.length > 500) st.sendTimes = st.sendTimes.slice(-500);
++            saveSocialV2State();
++            log(`[image] 工具发送图片失败 ${key}: ${error?.message ?? error}`);
++            sendJson({ ok: false, error: `发送图片失败：${error?.message ?? error}` }, 500);
++          }
++          return;
++        }
+         if (req.method === 'POST' && url.pathname === '/api/socialV2/collect-sticker') {
+           if (!stickerEnabled()) { sendJson({ ok: false, error: '表情包体系已关闭' }, 403); return; }
+           const body = await readBody();
+@@ -3487,6 +3942,20 @@
+           }
+           activeWaits.add(key);
+           const finishWait = () => activeWaits.delete(key);
++          // 主人优先级：等待期间主人一说话就立刻结束等待，让这一轮尽快收尾，
++          // 好把共享会话让出来给主人的消息。
++          const ownerKey = `private:${String(cfg.ownerQQ ?? '')}`;
++          const waitStartedAt = Date.now();
++          const ownerWatch = setInterval(() => {
++            if (key === ownerKey) return;
++            const ost = getSocialV2State(ownerKey);
++            const hasFresh = Array.isArray(ost.unread) && ost.unread.some((m) => Number(m?.time || 0) >= waitStartedAt - 1000);
++            if (hasFresh) {
++              log('[priority] 主人有新消息，提前结束等待，让回合收尾');
++              req.destroy?.();
++            }
++          }, 800);
++          req.on('close', () => clearInterval(ownerWatch));
+           req.on('close', finishWait);
+           const minQuietAfterNewMs = Number.isFinite(Number(waitCfg.minQuietAfterNewMs)) ? Math.max(0, Number(waitCfg.minQuietAfterNewMs)) : 10000;
+           const suggestedQuietMs = Math.max(suggestQuietMsV2(st), minQuietAfterNewMs);
+@@ -4307,6 +4776,14 @@
+           saveSocialV2State();
+           saveState();
+           try { await api.workspace.archiveSession({ sessionId: oldSessionId }); } catch {}
++          // 共享会话：重置任何一个会话 = 整条线一起重置（否则别的会话还挂着旧共享会话）
++          if (sharedSessionEnabled() && sharedSessionId && oldSessionId === sharedSessionId) {
++            sharedSessionId = null;
++            try { fs.unlinkSync(SHARED_SESSION_FILE); } catch {}
++            for (const k of Object.keys(state.sessions)) delete state.sessions[k];
++            saveState();
++            log('[shared] 共享会话已重置，所有会话下次重新接入同一条新会话');
++          }
+           log(`控制台：已清除会话上下文 ${key}（旧会话 ${oldSessionId} 已归档）`);
+           sendJson({ ok: true, key, archived: oldSessionId });
+           return;
+@@ -5058,6 +5535,23 @@
+   // 视觉模型应用去重：每个 DSH 会话在本进程内只 selectModel 一次。
+   // 四种 QQ 模式共用 DSH 会话，统一强制使用 DeepSeek-V4-Flash-Vision-Exp + max 思考强度。
+   const visionModelAppliedSessions = new Set();
++  // 学习/整理类会话（黑话研究、记忆提炼、游戏功课、交接摘要）都是纯文本 JSON 任务，
++  // 用便宜的模型 + 低推理就能干，没必要跑视觉大模型 + max 推理。
++  const learnerModelApplied = new Set();
++  async function ensureLearnerModel(sessionId) {
++    if (!sessionId || learnerModelApplied.has(sessionId)) return;
++    const provider = String(cfg.dsh?.provider || 'deepseek-official');
++    const model = String(cfg.slang?.learnerModel || 'deepseek-v4-flash');
++    const effort = String(cfg.slang?.learnerEffort || 'low');
++    try {
++      const result = unwrap(await api.sessions.selectModel({ sessionId, provider, model, reasoningEffort: effort }), 'session.selectModel');
++      learnerModelApplied.add(sessionId);
++      log(`[cost] 学习会话降配 ${sessionId} -> ${result.selected.provider}/${result.selected.model} (${result.selected.reasoningEffort ?? '默认'})`);
++    } catch (error) {
++      log(`[cost] 学习会话降配失败（沿用默认模型）: ${error?.message ?? error}`);
++    }
++  }
++
+   async function ensureVisionModel(sessionId) {
+     if (visionModelAppliedSessions.has(sessionId)) return;
+     const provider = String(cfg.dsh?.provider || 'deepseek-official');
+@@ -5076,8 +5570,563 @@
+     }
+   }
+ 
++  // ── 共享会话（群聊 + 私聊共用同一个 DSH 会话）────────────────────────────
++  // 打开后，所有会话都指向同一个 DSH session：上下文真正连成一条，群聊里说过的话
++  // 私聊接着就能用（不靠摘要注入）。代价是并发时两个聊天会挤同一条会话。
++  const SHARED_SESSION_FILE = path.join(STATE_DIR, 'shared-session.json');
++  let sharedSessionId = null;
++
++  // 注意：loadConfig() 是“白名单式”合并，config.json 里新增的顶层段会被丢掉，
++  // 所以这里额外直接读原始 config.json（按 mtime 缓存），保证 sharedSession 开关真的生效。
++  // 直接读原始 config.json 的某些开关（loadConfig 会丢掉未知顶层键）
++  let rawCfgCache = { mtime: -1, data: {} };
++  function rawConfigFlag(name, fallback) {
++    try {
++      const p2 = path.join(ROOT, 'config.json');
++      const st2 = fs.statSync(p2);
++      if (rawCfgCache.mtime !== st2.mtimeMs) {
++        rawCfgCache = { mtime: st2.mtimeMs, data: JSON.parse(fs.readFileSync(p2, 'utf8')) };
++      }
++      const v = rawCfgCache.data?.[name];
++      return v === undefined ? fallback : v;
++    } catch {
++      return fallback;
++    }
++  }
++
++  let sharedCfgCache = { mtime: -1, enabled: false };
++  function sharedSessionEnabled() {
++    if (cfg.sharedSession?.enabled === true) return true;
++    try {
++      const p = path.join(ROOT, 'config.json');
++      const st = fs.statSync(p);
++      if (sharedCfgCache.mtime !== st.mtimeMs) {
++        const raw = JSON.parse(fs.readFileSync(p, 'utf8'));
++        sharedCfgCache = { mtime: st.mtimeMs, enabled: raw?.sharedSession?.enabled === true };
++      }
++      return sharedCfgCache.enabled;
++    } catch {
++      return false;
++    }
++  }
++
++  function loadSharedSessionId() {
++    if (sharedSessionId) return sharedSessionId;
++    const saved = readJsonSafe(SHARED_SESSION_FILE, {});
++    if (saved?.sessionId) sharedSessionId = String(saved.sessionId);
++    return sharedSessionId;
++  }
++
++  function saveSharedSessionId(id) {
++    sharedSessionId = id;
++    try {
++      fs.mkdirSync(STATE_DIR, { recursive: true });
++      atomicWriteJson(SHARED_SESSION_FILE, { sessionId: id, updatedAt: new Date().toISOString() });
++    } catch (error) {
++      log('[shared] 保存共享会话失败:', error?.message ?? error);
++    }
++  }
++
++  // ── 交接摘要（换线前把“现在在聊什么”留给下一条线）────────────────────────
++  const HANDOFF_FILE = path.join(STATE_DIR, 'handoff.json');
++  let handoffCache = readJsonSafe(HANDOFF_FILE, null);
++
++  function readHandoff() {
++    if (handoffCache && handoffCache.text) return handoffCache;
++    handoffCache = readJsonSafe(HANDOFF_FILE, null);
++    return handoffCache;
++  }
++
++  function saveHandoff(text, reason) {
++    const rec = { text: String(text ?? '').slice(0, 2000), createdAt: Date.now(), reason: String(reason ?? '') };
++    handoffCache = rec;
++    try {
++      fs.mkdirSync(STATE_DIR, { recursive: true });
++      atomicWriteJson(HANDOFF_FILE, rec);
++    } catch (error) {
++      log('[handoff] 保存失败:', error?.message ?? error);
++    }
++  }
++
++  function buildHandoffPrompt(limit = 70) {
++    const now = Date.now();
++    const lines = [];
++    for (const [key, st] of socialV2.conversations.entries()) {
++      const rms = Array.isArray(st?.recentMessages) ? st.recentMessages : [];
++      for (const m of rms.slice(-40)) {
++        const t = Number(m?.time) || 0;
++        if (!t || now - t > 24 * 3600 * 1000) continue;
++        const text = String(m.text || m.plain || '').replace(/\s+/g, ' ').trim();
++        if (!text) continue;
++        lines.push({ t, key, who: m.isSelf ? '我' : (m.sender || '某人'), text: text.slice(0, 100) });
++      }
++    }
++    lines.sort((a, b) => a.t - b.t);
++    const picked = lines.slice(-limit);
++    const body = picked.map((l) => {
++      const label = String(l.key).startsWith('group:') ? `群${String(l.key).slice(6)}` : (String(l.key) === `private:${String(cfg.ownerQQ ?? '')}` ? '私聊·主人' : '私聊');
++      return `[${label}] ${l.who}：${l.text}`;
++    }).join('\n');
++    return [
++      '你是会话交接记录员。下面是一条即将被清空重开的 QQ 会话最近的聊天记录（可能包含多个群和私聊）。',
++      '请写一段「交接备忘」，让换上新会话后的自己能无缝接上。要求：',
++      '- 6~10 行，每行一句话，第三人称，不要客套。',
++      '- 必须包含：① 各个群/私聊现在在聊什么 ② 主人（owner）最近在忙什么、有没有交代要做的事 ③ 谁约了什么（开黑时间/承诺） ④ 最近的情绪气氛或热梗',
++      '- 不要罗列所有消息，只保留"接上话"必需的；不写废话、不写"以上"。',
++      '',
++      '聊天记录：',
++      body
++    ].join('\n');
++  }
++
++  // 生成交接摘要（用独立的学习会话，避免依赖即将失效的那条会话）
++  async function generateHandoff(reason) {
++    if (cfg.handoff?.enabled === false) return null;
++    if (!dshReady) return null;
++    let sessionId;
++    try {
++      sessionId = await ensureSlangLearnerSession();
++    } catch (error) {
++      log('[handoff] 学习会话不可用，跳过交接摘要:', error?.message ?? error);
++      return null;
++    }
++    let summary = '';
++    // 注意：这里不能再套 queueSlangTask（rotateSessionWithHandoff 本身就跑在链上，会自锁）
++    try {
++      const accepted = await api.sessions.prompt({ sessionId, mode: 'queue', content: [{ type: 'text', text: buildHandoffPrompt() }] });
++      if (!accepted.result.ok) {
++        log(`[handoff] 生成被拒: ${accepted.result.error.code}: ${accepted.result.error.message}`);
++        return null;
++      }
++      const output = await waitLearnerTurn(sessionId);
++      summary = String(output ?? '').trim().slice(0, 1800);
++    } catch (error) {
++      log('[handoff] 生成失败:', error?.message ?? error);
++    }
++    if (summary) {
++      saveHandoff(summary, reason);
++      log(`[handoff] 已生成交接摘要（${summary.length} 字）：${summary.slice(0, 60)}…`);
++      maybeRotateLearnerSession();
++      return summary;
++    }
++    return null;
++  }
++
++  function buildHandoffDigest() {
++    const h = readHandoff();
++    if (!h?.text) return '';
++    const ageHours = (Date.now() - (Number(h.createdAt) || 0)) / 3600000;
++    if (ageHours > (Number(cfg.handoff?.validHours) || 48)) return '';
++    return `【交接备忘（上一次换线前留给你的，帮你接上前面的线）】\n${h.text}\n\n`;
++  }
++
++  // 换线：先写交接摘要，再归档旧会话，清空映射（共享模式=全部）
++  async function rotateSessionWithHandoff(reason) {
++    await generateHandoff(reason);
++    const oldIds = new Set(Object.values(state.sessions));
++    if (sharedSessionEnabled()) {
++      sharedSessionId = null;
++      try { fs.unlinkSync(SHARED_SESSION_FILE); } catch {}
++      for (const k of Object.keys(state.sessions)) delete state.sessions[k];
++    } else {
++      for (const k of Object.keys(state.sessions)) delete state.sessions[k];
++    }
++    sessionEpoch += 1;
++    saveState();
++    for (const sid of oldIds) {
++      try { await api.workspace.archiveSession({ sessionId: sid }); } catch {}
++    }
++    log(`[handoff] 已换线（原因：${reason}），下次消息在新会话里继续`);
++  }
++
++  // 定期换线：会话体积过大或跑太久，就先写交接摘要再换新线（避免撞 400）
++  let lastRotateAt = Date.now();
++  let rotateBusy = false;
++  async function maybeRotateSession() {
++    if (rotateBusy) return;
++    const conf = cfg.handoff ?? {};
++    if (conf.autoRotate === false) return;
++    const sizeLimit = Number(conf.rotateAboveBytes) || 220 * 1024;
++    const hours = Number(conf.rotateEveryHours) || 12;
++    try {
++      let need = false;
++      let why = '';
++      const sid = sharedSessionEnabled() ? loadSharedSessionId() : Object.values(state.sessions)[0];
++      if (sid) {
++        const dir = '/root/.dsh/sessions';
++        // 找该会话的 zstd 文件
++        let size = 0;
++        for (const ws of fs.readdirSync(dir)) {
++          const f = path.join(dir, ws, sid, 'session.jsonl.zstd');
++          try { size = fs.statSync(f).size; break; } catch {}
++        }
++        if (size > sizeLimit) { need = true; why = `会话体积 ${Math.round(size / 1024)}KB 超过 ${Math.round(sizeLimit / 1024)}KB`; }
++      }
++      if (!need && (Date.now() - lastRotateAt) > hours * 3600 * 1000) {
++        need = true;
++        why = `已运行 ${hours} 小时`;
++      }
++      if (!need) return;
++      rotateBusy = true;
++      log(`[handoff] 触发换线：${why}`);
++      await queueSlangTask(() => rotateSessionWithHandoff(why));
++      lastRotateAt = Date.now();
++    } catch (error) {
++      log('[handoff] 定期换线失败:', error?.message ?? error);
++    } finally {
++      rotateBusy = false;
++    }
++  }
++
++  setInterval(() => { maybeRotateSession().catch(() => {}); }, 10 * 60 * 1000);
++
++  // ── 深夜省电 ─────────────────────────────────────────────────────────────
++  // 凌晨固定时段（默认 1~6 点）只保留"有人明确叫它"的唤醒（@/名字/提问/私聊/拍一拍），
++  // 关掉概率唤醒、主动机会检查、到点唤醒，省掉没人看时的 token。
++  function quietHoursConfig() {
++    const c = cfg.quietHours ?? {};
++    return { enabled: c.enabled !== false, start: Number(c.start ?? 1), end: Number(c.end ?? 6) };
++  }
++
++  function inQuietHours(now = new Date()) {
++    const q = quietHoursConfig();
++    if (!q.enabled) return false;
++    const h = now.getHours();
++    if (q.start === q.end) return false;
++    return q.start < q.end ? (h >= q.start && h < q.end) : (h >= q.start || h < q.end);
++  }
++
++  const QUIET_SKIP_REASONS = new Set(['proactiveCheck', 'probability', 'timeout']);
++
++  // ── 每日消耗报表 ─────────────────────────────────────────────────────────
++  function readZstdJsonLines(file) {
++    try {
++      const zlib = require('node:zlib');
++      if (typeof zlib.zstdDecompressSync !== 'function') return [];
++      const buf = zlib.zstdDecompressSync(fs.readFileSync(file));
++      return buf.toString('utf8').split('\n');
++    } catch {
++      return [];
++    }
++  }
++
++  function collectTokenUsage(hoursBack = 24, nowMs = Date.now()) {
++    const cutoff = nowMs - hoursBack * 3600 * 1000;
++    const root = path.join(process.env.DSH_HOME || path.join(os.homedir(), '.dsh'), 'sessions');
++    const byHour = new Map();
++    let calls = 0;
++    let input = 0;
++    let output = 0;
++    let cached = 0;
++    let files = 0;
++    let list = [];
++    try {
++      list = fs.readdirSync(root, { recursive: true })
++        .map((f) => String(f))
++        .filter((f) => f.endsWith('session.jsonl.zstd'))
++        .map((f) => path.join(root, f));
++    } catch {
++      return null;
++    }
++    for (const f of list) {
++      try {
++        if (fs.statSync(f).mtimeMs < cutoff) continue;
++      } catch { continue; }
++      files += 1;
++      for (const line of readZstdJsonLines(f)) {
++        if (!line || line.indexOf('"usage"') < 0) continue;
++        let d;
++        try { d = JSON.parse(line); } catch { continue; }
++        const u = d?.data?.usage;
++        const t = Number(d?.time) || 0;
++        if (!u || !t || t < cutoff) continue;
++        const i = Number(u.inputTokens) || 0;
++        const o = Number(u.outputTokens) || 0;
++        const c = Number(u.cacheReadTokens) || 0;
++        calls += 1;
++        input += i;
++        output += o;
++        cached += c;
++        const h = new Date(t).getHours();
++        const cur = byHour.get(h) ?? { calls: 0, tokens: 0 };
++        cur.calls += 1;
++        cur.tokens += i + o;
++        byHour.set(h, cur);
++      }
++    }
++    return { calls, input, output, cached, byHour, files };
++  }
++
++  function buildDailyReportText() {
++    const stat = collectTokenUsage(24);
++    if (!stat) return '昨天没能统计到（会话目录读不到）';
++    if (!stat.calls) return '昨天没怎么烧 token（0 次调用）';
++    const rows = [...stat.byHour.entries()].sort((a, b) => b[1].tokens - a[1].tokens);
++    const top = rows.slice(0, 2).map(([h, v]) => `${String(h).padStart(2, '0')}点(${v.tokens.toLocaleString()})`).join('、');
++    const lowRow = rows[rows.length - 1];
++    const low = lowRow ? `${String(lowRow[0]).padStart(2, '0')}点(${lowRow[1].tokens.toLocaleString()})` : '—';
++    const total = stat.input + stat.output;
++    return [
++      `昨天消耗：${(total / 10000).toFixed(1)} 万 tokens（输入 ${(stat.input / 10000).toFixed(1)} 万 / 输出 ${(stat.output / 10000).toFixed(1)} 万）`,
++      `调用 ${stat.calls} 次，缓存命中 ${(stat.cached / 10000).toFixed(0)} 万`,
++      `最烧：${top}；最省：${low}`
++    ].join('\n');
++  }
++
++  async function sendOwnerText(text) {
++    try {
++      const httpUrl = String(cfg.snowluma?.httpUrl || 'http://127.0.0.1:3000').replace(/\/+$/, '');
++      const res = await fetch(`${httpUrl}/send_private_msg`, {
++        method: 'POST',
++        headers: {
++          'content-type': 'application/json',
++          ...(cfg.snowluma?.accessToken ? { authorization: `Bearer ${cfg.snowluma.accessToken}` } : {})
++        },
++        body: JSON.stringify({ user_id: Number(cfg.ownerQQ), message: [{ type: 'text', data: { text } }] }),
++        signal: AbortSignal.timeout(20000)
++      });
++      const body = await res.json().catch(() => ({}));
++      if (!res.ok || body.status !== 'ok') throw new Error(body?.wording || `HTTP ${res.status}`);
++      log('[report] 日报已发送给主人');
++      return true;
++    } catch (error) {
++      log('[report] 发送失败:', error?.message ?? error);
++      return false;
++    }
++  }
++
++  let lastReportDate = '';
++  function maybeRunDailyReport() {
++    const conf = cfg.dailyReport ?? {};
++    if (conf.enabled === false) return;
++    const at = /^\d{1,2}:\d{2}$/.test(String(conf.time ?? '')) ? String(conf.time) : '09:00';
++    const now = new Date();
++    const hhmm = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
++    if (hhmm !== at) return;
++    const today = `${now.getFullYear()}-${now.getMonth() + 1}-${now.getDate()}`;
++    if (lastReportDate === today) return;
++    lastReportDate = today;
++    queueSlangTask(async () => {
++      const text = buildDailyReportText();
++      await sendOwnerText(text);
++      appendActivity(`console [report] 每日消耗报表：${text.split('\n')[0]}`);
++    });
++  }
++
++  setInterval(maybeRunDailyReport, 60 * 1000);
++
++  // ── 每周固定喊话（默认：周三 20:58、周六 19:58 给主人发「天地要塞」）────────
++  function weeklyMessagesConfig() {
++    const raw = rawConfigFlag('weeklyMessages', null);
++    if (raw && Array.isArray(raw.list) && raw.list.length) return raw.list;
++    if (raw && raw.enabled === false) return [];
++    return [
++      { weekday: 3, time: '20:58', text: '天地要塞' },
++      { weekday: 6, time: '19:58', text: '天地要塞' }
++    ];
++  }
++
++  const weeklySent = new Set();
++  function maybeSendWeekly() {
++    const list = weeklyMessagesConfig();
++    if (!list.length) return;
++    const now = new Date();
++    const hhmm = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
++    const day = now.getDay();
++    const dateKey = `${now.getFullYear()}-${now.getMonth() + 1}-${now.getDate()}`;
++    list.forEach((item, idx) => {
++      const weekday = Number(item?.weekday);
++      const time = String(item?.time ?? '');
++      const text = String(item?.text ?? '').trim();
++      if (!text || weekday !== day || time !== hhmm) return;
++      const key = `${dateKey}-${idx}`;
++      if (weeklySent.has(key)) return;
++      weeklySent.add(key);
++      queueSlangTask(async () => {
++        const ok = await sendOwnerText(text);
++        log(`[weekly] 定时喊话「${text}」${ok ? '已发送' : '发送失败'}`);
++        if (ok) appendActivity(`console [weekly] 定时喊话：${text}`);
++      });
++    });
++  }
++
++  setInterval(maybeSendWeekly, 60 * 1000);
++
++  // ── 游戏功课（火影手游/原神/MC/LOL/CS 的知识与梗）────────────────────────
++  // games.json 存每个游戏常青的术语/梗/注意点；聊天里提到某个游戏时只注入相关的一小段。
++  const GAMES_FILE = path.join(STATE_DIR, 'games.json');
++  let gamesCache = null;
++
++  function loadGames() {
++    if (gamesCache) return gamesCache;
++    gamesCache = readJsonSafe(GAMES_FILE, { games: {} });
++    if (!gamesCache.games) gamesCache.games = {};
++    return gamesCache;
++  }
++
++  function saveGames(data) {
++    gamesCache = data;
++    try {
++      fs.mkdirSync(STATE_DIR, { recursive: true });
++      atomicWriteJson(GAMES_FILE, data);
++    } catch (error) {
++      log('[games] 保存失败:', error?.message ?? error);
++    }
++  }
++
++  function matchGames(hintText) {
++    const text = String(hintText ?? '');
++    if (!text) return [];
++    const data = loadGames();
++    const hits = [];
++    for (const [name, info] of Object.entries(data.games || {})) {
++      const keys = [name, ...(Array.isArray(info?.aliases) ? info.aliases : [])];
++      if (keys.some((k) => k && text.includes(String(k)))) hits.push(name);
++    }
++    return hits;
++  }
++
++  function buildGamesDigest(hintText) {
++    if (cfg.gameStudy?.inject === false) return '';
++    const matched = matchGames(hintText).slice(0, 2);
++    if (!matched.length) return '';
++    const data = loadGames();
++    const blocks = [];
++    for (const name of matched) {
++      const info = data.games?.[name] || {};
++      const terms = (info.terms || []).slice(0, 6).map((t) => `${t.t}＝${t.d}`).join('；');
++      const memes = (info.memes || []).slice(0, 3).map((m) => `${m.n}（${m.d}）`).join('；');
++      const tips = (info.tips || []).slice(0, 2).join('；');
++      const lines = [`- ${name}：${terms}`];
++      if (memes) lines.push(`  梗：${memes}`);
++      if (tips) lines.push(`  注意：${tips}`);
++      blocks.push(lines.join('\n'));
++    }
++    log(`[games] 注入功课：${matched.join('、')}（${blocks.join('').length} 字）`);
++    return `【游戏功课（聊到这些游戏时用得上，别背术语、自然带出）】\n${blocks.join('\n')}\n\n`;
++  }
++
++  // 让学习 agent 上网补一补某个游戏的新梗/术语（每轮只做一个游戏）
++  async function runGameStudy(name) {
++    if (!dshReady) return;
++    const data = loadGames();
++    const info = data.games?.[name] || {};
++    let sessionId;
++    try {
++      sessionId = await ensureSlangLearnerSession();
++    } catch (error) {
++      log('[games] 学习会话不可用:', error?.message ?? error);
++      return;
++    }
++    const prompt = [
++      `请用联网搜索更新你对《${name}》这款游戏的了解，目标是能在游戏群里自然接话。`,
++      '搜索建议（很重要，官网站点常常抓不到正文）：',
++      '- 优先搜「游戏名 + 梗」「游戏名 + 黑话 / 术语」「游戏名 + 贴吧 / 米游社 / NGA / B站 吐槽」这类组合。',
++      '- 多换几个关键词搜 3~5 次；如果结果为空或只有官网基础介绍，就换用社区向关键词再试。',
++      '- 抓正文时优先贴吧、NGA、米游社、B站专栏/视频标题这类玩家内容，别只读官网。',
++      '要求：',
++      '1) 只要两类产出：玩家常用的术语（含缩写）、以及近期在传播的梗/梗图说法。',
++      '2) 每条一句话解释，口语化，别写成百科。',
++      '3) 已经知道的不要重复（下面列出已知内容）。',
++      '4) 宁可少写也别瞎编；搜不到就输出空数组，并在 version 里说明搜到了什么。',
++      '',
++      '已知术语：' + (info.terms || []).map((t) => t.t).join('、'),
++      '已知梗：' + (info.memes || []).map((m) => m.n).join('、'),
++      '',
++      '只输出 JSON，不要解释、不要代码块标记：',
++      '{"terms":[{"t":"术语","d":"一句话解释"}],"memes":[{"n":"梗名","d":"一句话解释"}],"version":"当前版本/赛季的一句话说明"}',
++      'terms 最多 5 条、memes 最多 4 条；没搜到新的就输出空数组。'
++    ].join('\n');
++    try {
++      const accepted = await api.sessions.prompt({ sessionId, mode: 'queue', content: [{ type: 'text', text: prompt }] });
++      if (!accepted.result.ok) {
++        log(`[games] 研究被拒: ${accepted.result.error.code}`);
++        return;
++      }
++      const output = await waitLearnerTurn(sessionId);
++      const raw = String(output ?? '');
++      const start = raw.indexOf('{');
++      const end = raw.lastIndexOf('}');
++      if (start < 0 || end <= start) { log(`[games] ${name} 没有返回 JSON`); return; }
++      let parsed;
++      try { parsed = JSON.parse(raw.slice(start, end + 1)); } catch { log(`[games] ${name} JSON 解析失败`); return; }
++      const cur = data.games?.[name] || { terms: [], memes: [], tips: [] };
++      const seenT = new Set((cur.terms || []).map((t) => t.t));
++      const seenM = new Set((cur.memes || []).map((m) => m.n));
++      let addedT = 0;
++      let addedM = 0;
++      for (const t of Array.isArray(parsed.terms) ? parsed.terms.slice(0, 5) : []) {
++        if (!t?.t || !t?.d || seenT.has(t.t)) continue;
++        cur.terms = [...(cur.terms || []), { t: String(t.t).slice(0, 24), d: String(t.d).slice(0, 80) }];
++        seenT.add(t.t);
++        addedT += 1;
++      }
++      for (const m of Array.isArray(parsed.memes) ? parsed.memes.slice(0, 4) : []) {
++        if (!m?.n || !m?.d || seenM.has(m.n)) continue;
++        cur.memes = [...(cur.memes || []), { n: String(m.n).slice(0, 24), d: String(m.d).slice(0, 80) }];
++        seenM.add(m.n);
++        addedM += 1;
++      }
++      if (parsed.version) cur.version = String(parsed.version).slice(0, 120);
++      cur.updatedAt = Date.now();
++      data.games = { ...(data.games || {}), [name]: cur };
++      data.updatedAt = new Date().toISOString();
++      saveGames(data);
++      log(`[games] ${name} 功课更新：术语 +${addedT}，梗 +${addedM}${parsed.version ? `，版本：${String(parsed.version).slice(0, 40)}` : ''}`);
++      maybeRotateLearnerSession();
++      if (addedT + addedM > 0) {
++        addLongMemory({
++          text: `《${name}》近期玩家常用：${[...cur.terms.slice(-addedT).map((t) => t.t), ...cur.memes.slice(-addedM).map((m) => m.n)].join('、')}`,
++          type: 'fact',
++          key: '',
++          tags: [name],
++          importance: 2,
++          source: 'game-study'
++        });
++      }
++    } catch (error) {
++      if (/会话|session|not found|404/i.test(String(error?.message ?? error))) invalidateSlangLearnerSession();
++      log('[games] 研究失败:', error?.message ?? error);
++    }
++  }
++
++  let lastGameStudyAt = 0;
++  function maybeStudyGames() {
++    const conf = cfg.gameStudy ?? {};
++    if (conf.enabled === false) return;
++    const hours = Number(conf.intervalHours) || 8;
++    if (Date.now() - lastGameStudyAt < hours * 3600 * 1000) return;
++    lastGameStudyAt = Date.now();
++    const data = loadGames();
++    const names = Object.keys(data.games || {});
++    if (!names.length) return;
++    names.sort((a, b) => (data.games[a]?.updatedAt || 0) - (data.games[b]?.updatedAt || 0));
++    const target = names[0];
++    queueSlangTask(() => runGameStudy(target));
++  }
++
++  setInterval(() => {
++    if (inQuietHours()) return;
++    maybeStudyGames();
++  }, 15 * 60 * 1000);
++
+   async function ensureSession(key) {
+     const epoch = sessionEpoch;
++    // 共享会话：任何会话都复用同一个 DSH session
++    if (sharedSessionEnabled()) {
++      const sid = loadSharedSessionId();
++      if (sid) {
++        if (state.sessions[key] !== sid) {
++          state.sessions[key] = sid;
++          reverse.set(sid, key);
++          saveState();
++        } else {
++          reverse.set(sid, key);
++        }
++        await ensureVisionModel(sid);
++        return sid;
++      }
++    }
+     const existing = state.sessions[key];
+     if (existing) {
+       // reset/清空工作区期间旧映射可能尚未清理；发现代际不匹配必须丢弃旧会话，防止复活。
+@@ -5127,6 +6176,8 @@
+       state.sessions[key] = sessionId;
+       reverse.set(sessionId, key);
+       saveState();
++      // 共享会话模式下，第一个建出来的会话成为全局共用会话
++      if (sharedSessionEnabled()) saveSharedSessionId(sessionId);
+       await ensureVisionModel(sessionId);
+       log(`新会话 ${key} -> ${sessionId}（模式 ${currentMode}，preset: ${modePreset(key, currentMode, cfg) ?? '默认'}）`);
+       return sessionId;
+@@ -6139,9 +7190,35 @@
+       const cacheKey = `${stateStat.mtimeMs}:${roleStat.mtimeMs}`;
+       if (roleHintCache.key === cacheKey) return roleHintCache.hint;
+       let hint = fs.readFileSync(roleFile, 'utf8');
+-      if (hint.length > 6000) hint = hint.slice(0, 6000);
++      if (hint.length > 9000) hint = hint.slice(0, 9000);
+       roleHintCache = { key: cacheKey, hint };
+       return hint;
++    } catch {
++      return '';
++    }
++  }
++
++  // 唤醒/提醒类 prompt 里直接内联角色卡正文。
++  // 只写一句“完整角色卡请调用 qq_get_prompt 查看”时，模型往往根本不去看，
++  // 人设就等于没生效（实测：换了角色卡之后说话还是客服味）。所以这里把卡贴进 prompt。
++  // 角色卡注入：每 N 轮注入完整卡，其余轮只注入精简版（省大量 token，避免上下文飞涨）
++  const roleCardTurns = new Map();
++  function roleCardBlockV2(key) {
++    try {
++      const rs = readRoleState();
++      if (!rs.role) return '';
++      const card = currentRoleHintV2();
++      if (!card) return `【当前角色】${rs.role}\n\n`;
++      const full = card.length > 12000
++        ? card.slice(0, 12000) + '\n（角色卡过长已截断，完整内容可用 qq_get_prompt 查看）'
++        : card;
++      const every = Math.max(1, Number(cfg.roleCard?.fullEveryTurns) || 8);
++      const n = (roleCardTurns.get(key ?? '') ?? 0) + 1;
++      roleCardTurns.set(key ?? '', n);
++      const wantFull = n % every === 1; // 第 1、every+1、2*every+1… 轮注入完整卡
++      const body = wantFull ? full : `${card.slice(0, 600)}\n…（本轮只给开头这段，完整角色卡可用 qq_get_prompt 查看；你本来就该按它说话）`;
++      log(`[role] 注入角色卡「${rs.role}」${body.length} 字${wantFull ? '（完整）' : '（精简）'}`);
++      return `【角色卡·${rs.role} —— 这就是你本人，优先级高于下面的通用规则】\n${body}\n【角色卡结束】每次发言前对照这张卡：短句一条一行、不客服腔、不总结不说教；被骂不回、有人喊开黑就复读、越权请求只回“收到”、看不懂的图不回。\n\n`;
+     } catch {
+       return '';
+     }
+@@ -6712,9 +7789,281 @@
+     return null;
+   }
+ 
++  // ── 跨会话记忆（同一条时间线）─────────────────────────────────────────────
++  // 群聊和私聊不再是“各看各的”：每个会话拿到的都是「所有会话混排的一条时间线」，
++  // 所以私聊能想起群里刚聊的、群聊也能想起私聊说过的事，观感像同一根线在走。
++  function crossChatConfig() {
++    const c = cfg.crossChat ?? {};
++    return {
++      enabled: c.enabled !== false,
++      // includeCurrent：把当前会话也并进这条线（默认开），关掉就只注入“别的会话”
++      includeCurrent: c.includeCurrent !== false,
++      maxLines: Math.max(3, Math.min(60, Number(c.maxLines) || 24)),
++      windowMs: Math.max(10 * 60 * 1000, Number(c.windowMs) || 12 * 3600 * 1000),
++      exclude: new Set(Array.isArray(c.exclude) ? c.exclude.map(String) : [])
++    };
++  }
++
++  function crossChatLabel(key) {
++    if (String(key).startsWith('group:')) return `群${String(key).slice(6)}`;
++    if (String(key) === `private:${String(cfg.ownerQQ ?? '')}`) return '私聊·主人';
++    return '私聊';
++  }
++
++  function buildCrossChatDigest(currentKey) {
++    const cc = crossChatConfig();
++    if (!cc.enabled) return '';
++    const now = Date.now();
++    const items = [];
++    for (const [key, st] of socialV2.conversations.entries()) {
++      if (!cc.includeCurrent && key === currentKey) continue;
++      if (cc.exclude.has(key)) continue;
++      const rms = Array.isArray(st?.recentMessages) ? st.recentMessages : [];
++      for (const m of rms) {
++        const t = Number(m?.time) || 0;
++        if (!t || now - t > cc.windowMs) continue;
++        const text = String(m.text || m.plain || '').replace(/\s+/g, ' ').trim();
++        if (!text) continue;
++        items.push({ t, key, sender: String(m.sender || ''), text, isSelf: !!m.isSelf });
++      }
++    }
++    if (!items.length) return '';
++    // 同一条消息可能同时出现在两边（当前会话 + 别的会话不会重复，但保险起见按 时间+内容 去重）
++    const seen = new Set();
++    const unique = [];
++    for (const it of items.sort((a, b) => a.t - b.t)) {
++      const sig = `${it.t}|${it.text.slice(0, 20)}`;
++      if (seen.has(sig)) continue;
++      seen.add(sig);
++      unique.push(it);
++    }
++    const picked = unique.slice(-cc.maxLines);
++    const lines = picked.map((i) => {
++      const when = new Date(i.t).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
++      const who = i.isSelf ? '你' : (i.sender || '某人');
++      const text = i.text.length > 40 ? `${i.text.slice(0, 40)}…` : i.text;
++      const tag = i.key === currentKey ? '当前' : '别处';
++      return `- [${crossChatLabel(i.key)}｜${tag} ${when}] ${who}：${text}`;
++    });
++    log(`[cross] 注入时间线 ${picked.length} 条 -> ${currentKey}`);
++    return `【最近所有会话的时间线（群聊和私聊混排成一条线，标“当前”的是你现在所在的会话）】\n${lines.join('\n')}\n注意：这条线只用来让你“一直在场、接得上话”；别处发生的内容（尤其别人的私聊）不要复述到群里，也不要跨会话点名爆对方的私料。\n\n`;
++  }
++
++  // ── 长期记忆 ─────────────────────────────────────────────────────────────
++  // 跨会话、永久保存的“人和事”：谁喜欢什么、约定了什么、发生过什么。
++  // 与【其他会话近期动态】不同：那个只管最近几小时，这个是长期账本，重启/重置会话都不会丢。
++  const LONG_MEMORY_FILE = path.join(STATE_DIR, 'long-memory.json');
++  const LONG_MEMORY_MAX = 800;
++
++  function loadLongMemory() {
++    try {
++      const arr = JSON.parse(fs.readFileSync(LONG_MEMORY_FILE, 'utf8'));
++      return Array.isArray(arr) ? arr.filter((m) => m && m.text) : [];
++    } catch {
++      return [];
++    }
++  }
++
++  let longMemory = loadLongMemory();
++
++  function saveLongMemory() {
++    try {
++      fs.mkdirSync(STATE_DIR, { recursive: true });
++      atomicWriteText(LONG_MEMORY_FILE, JSON.stringify(longMemory.slice(-LONG_MEMORY_MAX), null, 2));
++    } catch (error) {
++      log('[memory] 保存失败:', error?.message ?? error);
++    }
++  }
++
++  function addLongMemory({ text, type = 'fact', key = '', tags = [], importance = 3, source = 'ai' }) {
++    const t = String(text ?? '').replace(/\s+/g, ' ').trim().slice(0, 200);
++    if (t.length < 4) return null;
++    const norm = t.toLowerCase();
++    const dup = longMemory.find((m) => String(m.text ?? '').toLowerCase() === norm);
++    if (dup) {
++      dup.hits = (dup.hits ?? 1) + 1;
++      dup.lastTs = Date.now();
++      dup.importance = Math.min(5, (dup.importance ?? 3) + 1);
++      saveLongMemory();
++      return dup;
++    }
++    const rec = {
++      id: `lm-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
++      ts: Date.now(),
++      lastTs: Date.now(),
++      type: ['person', 'event', 'pref', 'fact', 'promise'].includes(type) ? type : 'fact',
++      key: String(key ?? ''),
++      tags: Array.isArray(tags) ? tags.map(String).slice(0, 5) : [],
++      text: t,
++      importance: Math.max(1, Math.min(5, Number(importance) || 3)),
++      hits: 1,
++      source: String(source ?? 'ai')
++    };
++    longMemory.push(rec);
++    if (longMemory.length > LONG_MEMORY_MAX) longMemory = longMemory.slice(-LONG_MEMORY_MAX);
++    saveLongMemory();
++    log(`[memory] 记住：${t.slice(0, 40)}`);
++    return rec;
++  }
++
++  function hanBigrams(text) {
++    const out = new Set();
++    const t = String(text ?? '').replace(/[^\p{Script=Han}a-zA-Z0-9]/gu, '');
++    for (let i = 0; i < t.length - 1; i++) out.add(t.slice(i, i + 2).toLowerCase());
++    return out;
++  }
++
++  // 按「相关度 + 重要度 + 时间新鲜度」挑出最该被想起的几条长期记忆
++  function buildLongMemoryDigest(currentKey, hintText) {
++    const conf = cfg.longMemory ?? {};
++    if (conf.enabled === false) return '';
++    const maxLines = Math.max(3, Math.min(30, Number(conf.maxLines) || 12));
++    if (!longMemory.length) return '';
++    const now = Date.now();
++    const hintGrams = hanBigrams(hintText);
++    const scored = longMemory.map((m) => {
++      let score = (Number(m.importance) || 3) * 1.5;
++      const age = now - (Number(m.lastTs) || Number(m.ts) || now);
++      if (age < 86400000) score += 3;
++      else if (age < 7 * 86400000) score += 2;
++      else if (age < 30 * 86400000) score += 1;
++      if (m.key === currentKey) score += 1.5;
++      if ((m.hits ?? 1) > 1) score += Math.min(2, (m.hits - 1) * 0.5);
++      if (hintGrams.size) {
++        let overlap = 0;
++        const mt = String(m.text ?? '').toLowerCase();
++        for (const g of hintGrams) {
++          if (mt.includes(g)) overlap += 1;
++          if (overlap >= 4) break;
++        }
++        score += overlap;
++      }
++      return { m, score };
++    });
++    scored.sort((a, b) => b.score - a.score);
++    const picked = scored.slice(0, maxLines).map((x) => x.m);
++    if (!picked.length) return '';
++    const label = { person: '人物', event: '事件', pref: '偏好', fact: '事实', promise: '约定' };
++    const lines = picked.map((m) => {
++      const type = label[m.type] ?? '记忆';
++      const when = new Date(Number(m.lastTs) || Number(m.ts)).toLocaleDateString('zh-CN');
++      return `- [${type} ${when}] ${m.text}`;
++    });
++    log(`[memory] 注入长期记忆 ${picked.length}/${longMemory.length} 条 -> ${currentKey}`);
++    return `【长期记忆（你记得的人和事，跨会话通用，最多用一两句自然带出）】\n${lines.join('\n')}\n\n`;
++  }
++
++  // 让学习 agent 把一段聊天提炼成 0~3 条长期记忆（跨会话、值得长期保留的那种）
++  const memorySummarizeCounts = new Map();
++  let memoryTaskChain = Promise.resolve();
++
++  function queueMemoryTask(fn) {
++    memoryTaskChain = memoryTaskChain.then(fn).catch((error) => log('长期记忆任务异常:', error?.message ?? error));
++    return memoryTaskChain;
++  }
++
++  function buildMemorySummaryPrompt(key, messages) {
++    const lines = messages.map((m) => {
++      const who = m.isSelf ? '我' : (m.sender || '某人');
++      return `${who}：${String(m.text || m.plain || '').replace(/\s+/g, ' ').slice(0, 120)}`;
++    }).join('\n');
++    return [
++      '你是长期记忆整理器。下面是一段 QQ 聊天记录。',
++      `会话：${key}`,
++      '请提炼出 0~3 条「值得长期记住」的事实。标准很严：',
++      '- 只保留以后真的可能有用的：某人的长期偏好/身份/擅长什么、约定（几点开黑、约好做什么）、重要事件（谁出什么事、谁换了什么）、群里的固定规矩或梗的来历。',
++      '- 不要记录：一次性的闲聊、情绪波动、图片内容、重复的客套、任何看起来像隐私泄露的敏感信息（手机号/地址/密码/身份证/转账）。',
++      '- 每条写成一句第三人称陈述句，20~60 字，别带“群里说”这种前缀。',
++      '- 没有值得记的就输出空数组。',
++      '',
++      '聊天记录：',
++      lines,
++      '',
++      '只输出 JSON 数组，不要任何解释或代码块标记。格式：',
++      '[{"text":"某人偏好大乱斗，不太玩排位","type":"pref","tags":["某人","大乱斗"],"importance":3}]',
++      'type 只能是 person/event/pref/fact/promise 之一；importance 1~5（越可能长期有用越高）。'
++    ].join('\n');
++  }
++
++  function parseMemorySummaryJson(output) {
++    const text = String(output ?? '').trim();
++    const start = text.indexOf('[');
++    const end = text.lastIndexOf(']');
++    if (start < 0 || end <= start) return [];
++    try {
++      const arr = JSON.parse(text.slice(start, end + 1));
++      if (!Array.isArray(arr)) return [];
++      return arr.filter((x) => x && typeof x.text === 'string' && x.text.trim().length >= 4).slice(0, 3);
++    } catch {
++      return [];
++    }
++  }
++
++  async function runMemorySummary(key) {
++    if (cfg.longMemory?.autoSummarize === false) return;
++    if (!dshReady) return;
++    const st = getSocialV2State(key);
++    const rms = (Array.isArray(st.recentMessages) ? st.recentMessages : [])
++      .filter((m) => m && (m.text || m.plain))
++      .slice(-40);
++    if (rms.length < 8) return;
++    let sessionId;
++    try {
++      sessionId = await ensureSlangLearnerSession();
++    } catch (error) {
++      log('长期记忆会话创建失败:', error?.message ?? error);
++      return;
++    }
++    try {
++      const accepted = await api.sessions.prompt({
++        sessionId,
++        mode: 'queue',
++        content: [{ type: 'text', text: buildMemorySummaryPrompt(key, rms) }]
++      });
++      if (!accepted.result.ok) {
++        log(`长期记忆提炼被拒: ${accepted.result.error.code}: ${accepted.result.error.message}`);
++        return;
++      }
++      const output = await waitLearnerTurn(sessionId);
++      const items = parseMemorySummaryJson(output);
++      if (!items.length) {
++        log(`[memory] ${key} 本轮没有值得长期记的内容`);
++        return;
++      }
++      for (const it of items) {
++        addLongMemory({
++          text: it.text,
++          type: it.type,
++          key,
++          tags: Array.isArray(it.tags) ? it.tags : [],
++          importance: it.importance,
++          source: 'auto'
++        });
++      }
++      log(`[memory] ${key} 提炼出 ${items.length} 条长期记忆`);
++      maybeRotateLearnerSession();
++    } catch (error) {
++      if (/会话|session|not found|404/i.test(String(error?.message ?? error))) invalidateSlangLearnerSession();
++      log('长期记忆提炼失败:', error?.message ?? error);
++    }
++  }
++
++  function maybeQueueMemorySummary(key) {
++    if (cfg.longMemory?.autoSummarize === false) return;
++    const every = Math.max(10, Number(cfg.longMemory?.summarizeEveryMessages) || 40);
++    const n = (memorySummarizeCounts.get(key) ?? 0) + 1;
++    if (n < every) {
++      memorySummarizeCounts.set(key, n);
++      return;
++    }
++    memorySummarizeCounts.set(key, 0);
++    if (!dshReady) return;
++    queueMemoryTask(() => runMemorySummary(key));
++  }
++
+   function buildWakePromptV2(key, reason) {
+     const roleState = readRoleState();
+-    const roleLine = roleState.role ? `【当前角色】${roleState.role}（完整角色卡请调用 qq_get_prompt 查看）\n\n` : '';
++    const roleLine = roleCardBlockV2(key);
+     const st = getSocialV2State(key);
+     const tokenLine = `【会话令牌】${st.agentToken}（调用二代状态工具时请在参数中带上此令牌）\n\n`;
+     const memoryText = formatMemoryV2(st);
+@@ -6752,7 +8101,10 @@
+     if (wcTr.anyMessage) wcTriggers.push('任意消息');
+     if (Number(wcTr.probability) > 0) wcTriggers.push(`概率${wcTr.probability}`);
+     const wakeLine = `【当前唤醒】${wcMode}，${wcTime}${wcTriggers.length ? `；触发：${wcTriggers.join('/')}` : ''}\n\n`;
+-    const base = roleLine + tokenLine + antiAiLine + proactiveLine + stickerLine + preSleepLine + statusLine + wakeLine + memoryLine + participationLine;
++    const memHint = (Array.isArray(st.recentMessages) ? st.recentMessages : []).slice(-8)
++      .map((m) => String(m?.text || m?.plain || ''))
++      .join(' ');
++    const base = roleLine + tokenLine + buildHandoffDigest() + antiAiLine + proactiveLine + stickerLine + preSleepLine + statusLine + wakeLine + memoryLine + participationLine + buildLongMemoryDigest(key, memHint) + buildGamesDigest(`${memHint} ${reason}`) + buildCrossChatDigest(key);
+     if (reason === 'bootstrap') {
+       return `${base}【引导唤醒】你已接入 QQ 会话 ${key}。\n当前是二代仿真模式：你的文本输出不会自动发送到 QQ，所有发言必须通过工具完成。\n请先调用 qq_get_prompt 查看你的角色、推荐值、可用工具和当前状态，然后用 qq_set_wake_config 设置你希望如何被唤醒。`;
+     }
+@@ -6765,15 +8117,47 @@
+     if (reason === 'proactiveCheck') {
+       return `${base}【主动机会】${key}\n原因：群里已经安静了一段时间，这是一次你可以主动冒泡的机会。\n优先主动开个话题、追问上次没聊完的事、分享一个刚想到的想法；如果一时想不到，可以用 mcp__web-search-safe__web_search 搜一下当前热点/时事/网络热梗，再结合记忆里的群友兴趣挑一个自然角度。只要内容自然，就大胆开口；如果实在没话想说，再安静收尾（qq_mark_read 或 qq_set_wake_config）。`;
+     }
++    if (reason === 'dailyDiary') {
++      return `${base}【每日日记】${key}\n现在是每天固定的日记时间。请做两件事：\n1) 用 mcp__diary__diary_write 写今天这篇日记：一两句话，写一个念头、一件小事、或你今天真正在意的东西；不要写总结、不要流水账、不要“今天和谁聊了什么”这种。\n2) 把日记内容用 mcp__snowluma__qq_send_message 发给主人（key 就用当前会话，token 用你的会话令牌），语气像在跟他说话，不要说“我写了日记”这种机制说明。\n做完正常收尾（qq_mark_read 或 qq_set_wake_config）。`;
++    }
+     if (reason === 'poke') {
+       return `${base}【唤醒】${key}\n原因：有人拍了一拍（可能拍了你，也可能拍了别人）。\n先看未读/最近消息里的 [拍一拍] 事件：如果是拍你，可以自然回应一句，也可以用 qq_send_poke 回一个拍一拍；如果是拍别人，觉得有趣也可以接梗。除了回应，偶尔也可以主动戳一下正在聊的人/熟人，像真人手贱/提醒/逗一下，但别频繁。不想接就安静收尾（qq_mark_read 或 qq_set_wake_config）。`;
+     }
+     return `${base}【唤醒】${key}\n原因：${reason}\n【行动前】先判断：群里在聊什么？热闹还是冷清？有没有人直接找你？对方说完了吗？你有没有真正想说的？\n如果群聊正热但没人叫你，可以插一句有趣的/相关的，插不上再看情况潜水；不要一上来就划走。\n【引用：只在必要时用】只有你这条消息指向的人或消息并非最新一条别人的消息，或者你连续的几句话中不同消息指代的是不同的消息或人时，才用 qq_reply 或 qq_send_message 的 replyToMessageId 指向具体那条；其他情况不要引用，别让对方猜。\n你可以调用工具查看未读消息、人设、状态，自行决定是否发言；决定潜水前必须按上面的【沉睡前强制等待】先等够观察窗口。`;
+   }
+ 
++  // ── 每日日记定时器 ───────────────────────────────────────────────────────
++  // 每分钟检查一次：到点（cfg.dailyDiary.time，默认 22:30）就唤醒主人私聊写日记并发给他。
++  let lastDiaryDate = '';
++  function diaryConfig() {
++    const c = cfg.dailyDiary ?? {};
++    return {
++      enabled: c.enabled !== false,
++      time: /^\d{1,2}:\d{2}$/.test(String(c.time ?? '')) ? String(c.time) : '22:30',
++      key: `private:${String(cfg.ownerQQ ?? '')}`
++    };
++  }
++
++  function maybeRunDailyDiary() {
++    const d = diaryConfig();
++    if (!d.enabled) return;
++    const now = new Date();
++    const hhmm = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
++    if (hhmm !== d.time) return;
++    const today = `${now.getFullYear()}-${now.getMonth() + 1}-${now.getDate()}`;
++    if (lastDiaryDate === today) return;
++    lastDiaryDate = today;
++    if (currentMode !== 'reserved2' || !dshReady) return;
++    if (!modeAllowed(d.key, 'private', Number(cfg.ownerQQ), cfg, currentMode)) return;
++    log(`[diary] 到点了（${d.time}），唤醒 ${d.key} 写日记并发给主人`);
++    scheduleWakeV2(d.key, 'dailyDiary');
++  }
++
++  setInterval(maybeRunDailyDiary, 60 * 1000);
++
+   function buildWakeReminderPromptV2(key) {
+     const roleState = readRoleState();
+-    const roleLine = roleState.role ? `【当前角色】${roleState.role}（完整角色卡请调用 qq_get_prompt 查看）\n\n` : '';
++    const roleLine = roleCardBlockV2(key);
+     const st = getSocialV2State(key);
+     const tokenLine = `【会话令牌】${st.agentToken}（调用二代状态工具时请在参数中带上此令牌）\n\n`;
+     const preSleepMs = Math.max(0, Number(cfg.socialV2?.wake?.preSleepWaitMs) || 300000);
+@@ -6933,9 +8317,35 @@
+     return WAKE_PRIORITY[base] ?? 0;
+   }
+ 
++  // 被动模式（默认开）：只有“被叫”才说话，拒绝一切主动冒泡类唤醒
++  // 概率唤醒保留（配置里是 0.1，偶尔插一句），其余主动类仍然跳过
++  const PASSIVE_SKIP_REASONS = new Set(['proactiveCheck', 'timeout', 'replyCheck']);
++  function passiveModeOn() {
++    return rawConfigFlag('passiveMode', true) !== false;
++  }
++
+   function scheduleWakeV2(key, reason) {
+     if (cfg.socialV2?.enabled === false) return;
+     if (socialV2.paused) return;
++    if (passiveModeOn() && PASSIVE_SKIP_REASONS.has(String(reason))) {
++      log(`[passive] 被动模式，跳过主动唤醒 ${key}（${reason}）`);
++      return;
++    }
++    // 概率唤醒额外加冷却：这个会话刚说过话就别又被“随缘”叫醒，避免群里刷屏
++    if (String(reason) === 'probability') {
++      const coolMs = Number(cfg.socialV2?.wake?.probabilityCooldownMs ?? 20 * 60 * 1000);
++      const stCool = getSocialV2State(key);
++      const lastReply = Number(stCool.lastAiReplyAt) || 0;
++      if (lastReply && Date.now() - lastReply < coolMs) {
++        log(`[freq] 概率唤醒冷却中，跳过 ${key}（距上次发言 ${Math.round((Date.now() - lastReply) / 60000)} 分钟）`);
++        return;
++      }
++    }
++    // 深夜省电：这段时间只保留“有人明确叫它”的唤醒
++    if (QUIET_SKIP_REASONS.has(String(reason)) && inQuietHours()) {
++      log(`[quiet] 深夜省电，跳过 ${key}（${reason}）`);
++      return;
++    }
+     if (!isSessionAllowedInCurrentMode(key)) {
+       log(`[reserved2] 跳过计划唤醒 ${key}（${reason}）：会话已不在当前模式允许范围内`);
+       return;
+@@ -6967,7 +8377,10 @@
+       st.sleepTimer = null;
+     }
+     st.pendingWakeReason = reason;
+-    const batchMs = Math.max(1000, Number(st.wakeConfig?.batchWindowMs) || 8000);
++    // 主人私聊走快车道：不等 8 秒合并窗口，1.2 秒内就唤醒（其余会话仍走配置值）
++    const isOwnerPrivate = key === `private:${String(cfg.ownerQQ ?? '')}`;
++    const cfgBatch = Number(st.wakeConfig?.batchWindowMs) || Number(cfg.socialV2?.wake?.batchWindowMs) || 8000;
++    const batchMs = Math.max(1000, isOwnerPrivate ? Math.min(1200, cfgBatch) : cfgBatch);
+     st.pendingWakeTimer = setTimeout(() => {
+       st.pendingWakeTimer = null;
+       const finalReason = st.pendingWakeReason || reason;
+@@ -7259,6 +8672,8 @@
+       appendSocialV2Message(key, sender, textContent, plainContent, quoteTargetIsSelf, isOwner, event.message_id ?? event.msg_id ?? null, mediaList, event.user_id ?? null, extractForwardIds(event.message ?? []));
+       // 二代同样收集群聊黑话学习素材（AI 自主提交之外，桥接仍自动提取高频陌生词）
+       if (kind === 'group') feedSlangWindow(key, sender, plainContent);
++      // 攒够一批消息就让学习 agent 提炼长期记忆（谁喜欢什么、约定、重要事件）
++      maybeQueueMemorySummary(key);
+       if (socialV2.paused) {
+         appendActivity(`${key} [reserved2] AI 已暂停，消息仅入库不唤醒：${textContent.slice(0, 80)}`);
+         return;
+@@ -7269,6 +8684,14 @@
+         saveSocialV2State();
+         scheduleWakeV2(key, 'bootstrap');
+       } else {
++        // 被动模式：只在真被叫（有实际内容）时才动
++        const stripped = String(plainContent ?? '').replace(/\[@[^\]]*\]|@\S+|\s+/g, '').trim();
++        if (stripped.length === 0 && !(Array.isArray(mediaList) && mediaList.length)) {
++          // 只 @ 了它但一个字没说（或纯表情/符号）：不唤醒，避免“空 @ 也回”
++          log(`[passive] 空 @ 不唤醒 ${key}`);
++          appendActivity(`${key} [reserved2] 空 @ 忽略（没有实际内容）`);
++          return;
++        }
+         const reason = evaluateWakeTriggerV2(key, st, event, kind, textContent, plainContent, quoteTargetIsSelf);
+         if (reason) {
+           scheduleWakeV2(key, reason);
+@@ -7901,7 +9324,19 @@
+               } else if (ended.reason.kind === 'error') {
+                 const msg = ended.reason.error?.message ?? '未知错误';
+                 const safeMsg = shouldAuditKey(key) && SENSITIVE_RE.test(msg) ? '（含敏感信息，已隐藏）' : msg.slice(0, 500);
+-                await sendToQQ(key, `⚠️ agent 处理出错：${safeMsg}`);
++                // 上下文超限/请求体过大（HTTP 400 一类）时自动换新会话，避免整条线卡死。
++                // 共享会话模式下，换新会影响所有会话（这也是共享的代价）。
++                if (/HTTP 400|context length|too long|maximum context|invalid_request/i.test(msg)) {
++                  try {
++                    log('[auto] 上下文超限（400），先写交接摘要再换线');
++                    await queueSlangTask(() => rotateSessionWithHandoff('400 上下文超限'));
++                  } catch (error) {
++                    log('[auto] 交接换线失败:', error?.message ?? error);
++                  }
++                  await sendToQQ(key, '⚠️ 上下文太长把模型撑爆了，我已经把「刚才在聊什么」写成交接备忘，换了一条新的线，你重新说一句就行');
++                } else {
++                  await sendToQQ(key, `⚠️ agent 处理出错：${safeMsg}`);
++                }
+                 if (isFarewell) {
+                   const st = socialState(key);
+                   if (st.phase === 'exiting') {
