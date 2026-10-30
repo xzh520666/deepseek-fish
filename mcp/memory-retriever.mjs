@@ -50,7 +50,7 @@ export class MemoryRetriever {
     this.model = model;
     this.timeoutMs = timeoutMs;
     this.cacheSize = cacheSize;
-    this.minSemantic = Number.isFinite(Number(minSemantic)) ? Math.max(0, Math.min(1, Number(minSemantic))) : 0.7;
+    this.minSemantic = Number.isFinite(Number(minSemantic)) ? Math.max(0, Math.min(1, Number(minSemantic))) : 0.4;
     this.cache = new Map();
     this.busy = false;
     this.onError = onError;

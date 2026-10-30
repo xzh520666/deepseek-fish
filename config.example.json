@@ -58,7 +58,7 @@
       "modelPath": "/opt/models/your-local-embedding-model",
       "dtype": "q8",
       "timeoutMs": 1500,
-      "minSemantic": 0.7
+      "minSemantic": 0.4
     }
   },
   "dailyDiary": {

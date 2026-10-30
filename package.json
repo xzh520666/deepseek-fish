@@ -1,0 +1,9 @@
+{
+  "name": "deepseek-fish-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "电脑侧 embedding 服务依赖（embed-server.js 用）",
+  "dependencies": {
+    "@huggingface/transformers": "^4.3.2"
+  }
+}

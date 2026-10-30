@@ -69,8 +69,8 @@ npm install --save-exact @huggingface/transformers
 }
 ```
 
-不同模型的余弦分数分布不同，当前语义阈值为 0.7；上线前用实际中文问题评测。
-本次测试使用可控向量验证检索与降级行为，未下载真实权重或验证真实模型效果。
+不同模型的余弦分数分布不同；实测 bge-small-zh-v1.5 相关句对余弦 0.34~0.72、无关 0.23~0.41，区分度偏弱（重叠区 0.34~0.42）。用 scripts/embedding-calibrate.mjs 扫 20 组句对，F1 最优阈值为 0.40（召回 90%、误召 10%）；追求少误召可上探 0.45（召回 80%、误召 0%）。区分度要求高时建议换 bge-base 或 bge-m3。
+embed-server 已用真实模型验证（512 维，单条约 16ms）；单元测试用可控向量验证检索与降级行为。
 本地模型加载设置依据官方文档：
 https://github.com/huggingface/transformers.js/blob/main/README.md
 

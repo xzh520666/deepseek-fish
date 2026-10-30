@@ -80,7 +80,7 @@ export function remember(records, input, { now = Date.now(), maxRecords = 5000 }
   return { records: [...records.map(m => m.id === old?.id ? { ...m, status: 'superseded' } : m), entry], entry };
 }
 
-export function search(records, { key, query = '', limit = 6, subjectId, now = Date.now(), queryVector, embeddingModel, minSemantic = 0.7 } = {}) {
+export function search(records, { key, query = '', limit = 6, subjectId, now = Date.now(), queryVector, embeddingModel, minSemantic = 0.4 } = {}) {
   const q = normal(query), qg = grams(q);
   const allowed = records.filter(m => visible(m, key, now) && (!subjectId || m.subjectId === String(subjectId)));
   return allowed.map(m => {
