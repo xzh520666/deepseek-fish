@@ -55,11 +55,18 @@ for p in "$REPO_DIR"/patches/*.patch; do
     if patch -p1 --forward --dry-run -R -i "$p" >/dev/null 2>&1; then
       ok "$name 已应用过，跳过"
     else
-      warn "$name 无法应用（上游版本可能不符），请检查 UPSTREAM_TAG"
+      die "$name 无法应用（上游版本可能不符），停止安装，请检查 UPSTREAM_TAG"
     fi
   fi
 done
 node --check src/bridge.js && ok "语法检查通过"
+
+cp "$REPO_DIR/persona/emotion-policy.mjs" "$QQ_BRIDGE_DIR/src/emotion-policy.mjs"
+node --check "$QQ_BRIDGE_DIR/src/emotion-policy.mjs"
+cp "$REPO_DIR/mcp/memory-store.mjs" "$QQ_BRIDGE_DIR/src/memory-store.mjs"
+cp "$REPO_DIR/mcp/memory-retriever.mjs" "$QQ_BRIDGE_DIR/src/memory-retriever.mjs"
+node --check "$QQ_BRIDGE_DIR/src/memory-store.mjs"
+node --check "$QQ_BRIDGE_DIR/src/memory-retriever.mjs"
 
 say "3/9 安装 DSH 并准备 profile"
 command -v dsh >/dev/null || npm i -g "@deepseek-ai/dsh@$DSH_VERSION"

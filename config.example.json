@@ -13,28 +13,83 @@
   },
   "ownerQQ": "{{OWNER_QQ}}",
   "allow": {
-    "private": ["{{OWNER_QQ}}"],
+    "private": [
+      "{{OWNER_QQ}}"
+    ],
     "groups": []
   },
-  "deny": { "private": [], "groups": [] },
+  "deny": {
+    "private": [],
+    "groups": []
+  },
   "allowAllWhenEmpty": false,
   "sessionCwd": "",
   "agentPreset": "qq-chat-v2",
   "workspaceTitle": "QQ 聊天",
   "consolePort": 3100,
-
   "passiveMode": true,
-  "sharedSession": { "enabled": true },
-  "handoff": { "enabled": true, "autoRotate": true, "rotateAboveBytes": 225280, "rotateEveryHours": 12, "validHours": 48 },
-  "crossChat": { "enabled": true, "includeCurrent": true, "maxLines": 10, "windowMs": 43200000, "exclude": [] },
-  "longMemory": { "enabled": true, "maxLines": 6, "summarizeEveryMessages": 40, "autoSummarize": true },
-  "dailyDiary": { "enabled": true, "time": "22:30" },
-  "dailyReport": { "enabled": true, "time": "09:00" },
-  "quietHours": { "enabled": true, "start": 1, "end": 6 },
-  "weeklyMessages": { "enabled": true, "list": [{ "weekday": 3, "time": "20:58", "text": "天地要塞" }] },
-  "gameStudy": { "enabled": true, "inject": true, "intervalHours": 8 },
-  "roleCard": { "fullEveryTurns": 8 },
-
+  "sharedSession": {
+    "enabled": false
+  },
+  "handoff": {
+    "enabled": true,
+    "autoRotate": true,
+    "rotateAboveBytes": 225280,
+    "rotateEveryHours": 12,
+    "validHours": 48
+  },
+  "crossChat": {
+    "enabled": false,
+    "includeCurrent": true,
+    "maxLines": 10,
+    "windowMs": 43200000,
+    "exclude": []
+  },
+  "longMemory": {
+    "enabled": true,
+    "maxLines": 6,
+    "summarizeEveryMessages": 40,
+    "autoSummarize": true,
+    "isolation": true,
+    "maxRecords": 5000,
+    "embedding": {
+      "enabled": false,
+      "modelPath": "/opt/models/your-local-embedding-model",
+      "dtype": "q8",
+      "timeoutMs": 1500
+    }
+  },
+  "dailyDiary": {
+    "enabled": true,
+    "time": "22:30"
+  },
+  "dailyReport": {
+    "enabled": true,
+    "time": "09:00"
+  },
+  "quietHours": {
+    "enabled": true,
+    "start": 1,
+    "end": 6
+  },
+  "weeklyMessages": {
+    "enabled": true,
+    "list": [
+      {
+        "weekday": 3,
+        "time": "20:58",
+        "text": "天地要塞"
+      }
+    ]
+  },
+  "gameStudy": {
+    "enabled": true,
+    "inject": true,
+    "intervalHours": 8
+  },
+  "roleCard": {
+    "fullEveryTurns": 8
+  },
   "slang": {
     "enabled": true,
     "injectMax": 8,
@@ -43,7 +98,6 @@
     "learnerRotateBytes": 81920,
     "learnerRotateTasks": 3
   },
-
   "socialV2": {
     "wake": {
       "batchWindowMs": 3000,
@@ -51,10 +105,24 @@
       "maxWakePerHour": 8,
       "preSleepWaitMs": 60000,
       "probabilityCooldownMs": 1200000,
-      "triggers": { "probability": 0.05 }
+      "triggers": {
+        "probability": 0.05
+      }
     },
-    "send": { "maxSendPerMinute": 2, "maxSendPerHour": 20 },
-    "proactive": { "enabled": false },
-    "sticker": { "enabled": true, "afterText": { "enabled": true, "probability": 0.35, "minGapMs": 120000 } }
+    "send": {
+      "maxSendPerMinute": 2,
+      "maxSendPerHour": 20
+    },
+    "proactive": {
+      "enabled": false
+    },
+    "sticker": {
+      "enabled": true,
+      "afterText": {
+        "enabled": true,
+        "probability": 0.35,
+        "minGapMs": 120000
+      }
+    }
   }
 }

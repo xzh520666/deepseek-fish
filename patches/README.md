@@ -1,5 +1,10 @@
 # 补丁说明
 
+新增 `0004-memory-rag.patch`：在前三个补丁之后应用，配合安装脚本复制的
+`memory-store.mjs` / `memory-retriever.mjs` 使用，不能单独应用到裸上游。
+本地已针对 v0.1.0 验证完整补丁链，记忆路由/存储集成测试通过；未验证线上 QQ/DSH。
+详细迁移、回滚与本地模型配置见 [记忆RAG升级](../docs/记忆RAG升级.md)。
+
 这三个文件是对 [qq-bridge v0.1.0](https://github.com/Derpyu520/qq-bridge) 的**修改**（unified diff）。
 本仓库**不包含上游源码**，安装时由 `server/install.sh` 自动拉取上游再打补丁。
 

@@ -1,14 +1,15 @@
 --- a/src/bridge.js
 +++ b/src/bridge.js
-@@ -6,6 +6,7 @@
+@@ -6,6 +6,8 @@
  //
  // 用法：node src/bridge.js （先编辑 ../config.json）
  import fs from 'node:fs';
 +import os from 'node:os';
++import { EmotionPolicy } from './emotion-policy.mjs';
  import http from 'node:http';
  import path from 'node:path';
  import crypto from 'node:crypto';
-@@ -766,8 +767,62 @@
+@@ -766,8 +768,62 @@
      return entry;
    }
  
@@ -71,7 +72,7 @@
      // 发送前强制同步一次，确保“刚新增的表情能立即用、刚删除的表情不会继续发”。
      const synced = await syncStickerLibrary(true);
      const entry = findSticker(synced?.entries ?? stickerEntries, stickerRef);
-@@ -790,15 +845,28 @@
+@@ -790,15 +846,28 @@
        if (!/^\d+$/.test(at)) throw new Error('atUserId 必须是正整数 QQ 号，且不能为 all');
        segments.push({ type: 'at', data: { qq: at } });
      }
@@ -109,7 +110,7 @@
      const httpUrl = String(cfg.snowluma?.httpUrl || 'http://127.0.0.1:3000').replace(/\/+$/, '');
      // 与文本发送共用 sendChain，保证“先文字后表情”的真人顺序不被并发工具调用打乱。
      let sendResolve;
-@@ -838,6 +906,100 @@
+@@ -838,6 +907,100 @@
      return { entry: updated.entry, messageId: data?.message_id ?? null };
    }
  
@@ -210,7 +211,7 @@
    // 更新本地 AI 认知（含义/标签/用法）。
    function applyStickerNoteV2(stickerId, note, tags, usage) {
      const patch = {};
-@@ -928,12 +1090,14 @@
+@@ -928,12 +1091,14 @@
    async function ensureSlangLearnerSession() {
      if (slangLearnerSessionId) {
        learnerSessions.add(slangLearnerSessionId);
@@ -225,7 +226,7 @@
        return slangLearnerSessionId;
      }
      const dir = path.join(STATE_DIR, 'slang-agent');
-@@ -951,6 +1115,7 @@
+@@ -951,6 +1116,7 @@
      learnerSessions.add(slangLearnerSessionId);
      fs.mkdirSync(STATE_DIR, { recursive: true });
      atomicWriteJson(SLANG_SESSION_FILE, { sessionId: slangLearnerSessionId });
@@ -233,7 +234,7 @@
      log(`黑话学习会话已创建：${slangLearnerSessionId}`);
      return slangLearnerSessionId;
    }
-@@ -964,6 +1129,36 @@
+@@ -964,6 +1130,36 @@
        learnerSessions.delete(oldId);
      }
      try { fs.unlinkSync(SLANG_SESSION_FILE); } catch {}
@@ -270,7 +271,7 @@
    }
  
    function waitLearnerTurn(sessionId, timeoutMs = 120000) {
-@@ -982,6 +1177,54 @@
+@@ -982,6 +1178,54 @@
      });
    }
  
@@ -325,7 +326,7 @@
    async function runSlangExtraction(key) {
      if (cfg.slang?.enabled === false) return;
      if (!dshReady) return;
-@@ -1014,12 +1257,15 @@
+@@ -1014,12 +1258,15 @@
        }
        let added = 0;
        let updated = 0;
@@ -341,7 +342,7 @@
          const idx = Number(item.source_id) - 1;
          const src = Number.isInteger(idx) && idx >= 0 && idx < messages.length ? messages[idx] : null;
          const evidence = src ? [{ key, sender: src.sender, text: src.text, time: src.time }] : [];
-@@ -1032,7 +1278,7 @@
+@@ -1032,7 +1279,7 @@
        const win = slangWindows.get(key) ?? [];
        slangWindows.set(key, win.slice(messages.length));
        saveSlangStore();
@@ -350,7 +351,7 @@
        if (researchCandidates.length && cfg.slang?.autoResearch !== false) {
          queueSlangTask(() => runSlangResearch(researchCandidates));
        }
-@@ -1085,6 +1331,14 @@
+@@ -1085,6 +1332,14 @@
          if (Array.isArray(r.sources) && r.sources.length) entry.sources = r.sources.map((s) => String(s ?? '').trim()).filter(Boolean).slice(0, 10);
          entry.lastInferenceCount = entry.count;
          entry.updatedAt = new Date().toISOString();
@@ -365,7 +366,7 @@
        }
        saveSlangStore();
        log(`黑话研究：已更新 ${results.length} 条候选解释`);
-@@ -1808,6 +2062,100 @@
+@@ -1808,6 +2063,100 @@
            sendJson({ ok: true, rejectedCount });
            return;
          }
@@ -466,7 +467,7 @@
          const slangMatch = url.pathname.match(/^\/api\/slang\/([^/]+)(?:\/(confirm|reject))?$/);
          if (req.method === 'PATCH' && slangMatch && !slangMatch[2]) {
            const id = slangMatch[1];
-@@ -2198,7 +2546,7 @@
+@@ -2198,7 +2547,7 @@
            }
            const isV2 = currentMode === 'reserved2';
            const roleState = readRoleState();
@@ -475,7 +476,7 @@
            // 二代必须带会话令牌，否则 AI 调用任何 MCP 状态/发送工具都会被拒。
            let tokenLine = '';
            if (isV2) {
-@@ -2499,6 +2847,10 @@
+@@ -2499,6 +2848,10 @@
              listStickers: 'qq_list_stickers',
              getStickerImage: 'qq_get_sticker_image',
              sendSticker: 'qq_send_sticker',
@@ -486,7 +487,7 @@
              setStickerRemark: 'qq_set_sticker_remark',
              stickerNote: 'qq_sticker_note',
              collectSticker: 'qq_collect_sticker',
-@@ -2889,7 +3241,11 @@
+@@ -2889,7 +3242,11 @@
              saveSocialV2State();
              log(`[reserved2] 工具分条发送 ${key}: 成功 ${sentMessages.length}/${messages.length} 条`);
              appendActivity(`${key} [reserved2] 工具分条发送：成功 ${sentMessages.length}/${messages.length} 条`);
@@ -499,7 +500,7 @@
              const burstHint = messages.length >= 3 ? '你已经连发了多条，确认是必要的吗？真人很少一口气补完。' : undefined;
              const spaceWarn = findCjkSpaceWarning(messages);
              const splitWarn = findSplitBoundaryWarning(messages);
-@@ -3343,6 +3699,105 @@
+@@ -3343,6 +3700,105 @@
            }
            return;
          }
@@ -605,7 +606,7 @@
          if (req.method === 'POST' && url.pathname === '/api/socialV2/collect-sticker') {
            if (!stickerEnabled()) { sendJson({ ok: false, error: '表情包体系已关闭' }, 403); return; }
            const body = await readBody();
-@@ -3487,6 +3942,20 @@
+@@ -3487,6 +3943,20 @@
            }
            activeWaits.add(key);
            const finishWait = () => activeWaits.delete(key);
@@ -626,7 +627,7 @@
            req.on('close', finishWait);
            const minQuietAfterNewMs = Number.isFinite(Number(waitCfg.minQuietAfterNewMs)) ? Math.max(0, Number(waitCfg.minQuietAfterNewMs)) : 10000;
            const suggestedQuietMs = Math.max(suggestQuietMsV2(st), minQuietAfterNewMs);
-@@ -4307,6 +4776,14 @@
+@@ -4307,6 +4777,14 @@
            saveSocialV2State();
            saveState();
            try { await api.workspace.archiveSession({ sessionId: oldSessionId }); } catch {}
@@ -641,7 +642,7 @@
            log(`控制台：已清除会话上下文 ${key}（旧会话 ${oldSessionId} 已归档）`);
            sendJson({ ok: true, key, archived: oldSessionId });
            return;
-@@ -5058,6 +5535,23 @@
+@@ -5058,6 +5536,23 @@
    // 视觉模型应用去重：每个 DSH 会话在本进程内只 selectModel 一次。
    // 四种 QQ 模式共用 DSH 会话，统一强制使用 DeepSeek-V4-Flash-Vision-Exp + max 思考强度。
    const visionModelAppliedSessions = new Set();
@@ -665,7 +666,7 @@
    async function ensureVisionModel(sessionId) {
      if (visionModelAppliedSessions.has(sessionId)) return;
      const provider = String(cfg.dsh?.provider || 'deepseek-official');
-@@ -5076,8 +5570,563 @@
+@@ -5076,8 +5571,563 @@
      }
    }
  
@@ -1229,7 +1230,7 @@
      const existing = state.sessions[key];
      if (existing) {
        // reset/清空工作区期间旧映射可能尚未清理；发现代际不匹配必须丢弃旧会话，防止复活。
-@@ -5127,6 +6176,8 @@
+@@ -5127,6 +6177,8 @@
        state.sessions[key] = sessionId;
        reverse.set(sessionId, key);
        saveState();
@@ -1238,7 +1239,7 @@
        await ensureVisionModel(sessionId);
        log(`新会话 ${key} -> ${sessionId}（模式 ${currentMode}，preset: ${modePreset(key, currentMode, cfg) ?? '默认'}）`);
        return sessionId;
-@@ -6139,9 +7190,35 @@
+@@ -6139,9 +7191,36 @@
        const cacheKey = `${stateStat.mtimeMs}:${roleStat.mtimeMs}`;
        if (roleHintCache.key === cacheKey) return roleHintCache.hint;
        let hint = fs.readFileSync(roleFile, 'utf8');
@@ -1255,6 +1256,7 @@
 +  // 只写一句“完整角色卡请调用 qq_get_prompt 查看”时，模型往往根本不去看，
 +  // 人设就等于没生效（实测：换了角色卡之后说话还是客服味）。所以这里把卡贴进 prompt。
 +  // 角色卡注入：每 N 轮注入完整卡，其余轮只注入精简版（省大量 token，避免上下文飞涨）
++  const emotionPolicy = new EmotionPolicy();
 +  const roleCardTurns = new Map();
 +  function roleCardBlockV2(key) {
 +    try {
@@ -1275,7 +1277,7 @@
      } catch {
        return '';
      }
-@@ -6712,9 +7789,281 @@
+@@ -6712,9 +7791,281 @@
      return null;
    }
  
@@ -1558,7 +1560,7 @@
      const st = getSocialV2State(key);
      const tokenLine = `【会话令牌】${st.agentToken}（调用二代状态工具时请在参数中带上此令牌）\n\n`;
      const memoryText = formatMemoryV2(st);
-@@ -6752,7 +8101,10 @@
+@@ -6752,7 +8103,11 @@
      if (wcTr.anyMessage) wcTriggers.push('任意消息');
      if (Number(wcTr.probability) > 0) wcTriggers.push(`概率${wcTr.probability}`);
      const wakeLine = `【当前唤醒】${wcMode}，${wcTime}${wcTriggers.length ? `；触发：${wcTriggers.join('/')}` : ''}\n\n`;
@@ -1566,11 +1568,12 @@
 +    const memHint = (Array.isArray(st.recentMessages) ? st.recentMessages : []).slice(-8)
 +      .map((m) => String(m?.text || m?.plain || ''))
 +      .join(' ');
-+    const base = roleLine + tokenLine + buildHandoffDigest() + antiAiLine + proactiveLine + stickerLine + preSleepLine + statusLine + wakeLine + memoryLine + participationLine + buildLongMemoryDigest(key, memHint) + buildGamesDigest(`${memHint} ${reason}`) + buildCrossChatDigest(key);
++    const emotionLine = emotionPolicy.prompt(key, Array.isArray(st.recentMessages) ? st.recentMessages : []);
++    const base = roleLine + emotionLine + tokenLine + buildHandoffDigest() + antiAiLine + proactiveLine + stickerLine + preSleepLine + statusLine + wakeLine + memoryLine + participationLine + buildLongMemoryDigest(key, memHint) + buildGamesDigest(`${memHint} ${reason}`) + buildCrossChatDigest(key);
      if (reason === 'bootstrap') {
        return `${base}【引导唤醒】你已接入 QQ 会话 ${key}。\n当前是二代仿真模式：你的文本输出不会自动发送到 QQ，所有发言必须通过工具完成。\n请先调用 qq_get_prompt 查看你的角色、推荐值、可用工具和当前状态，然后用 qq_set_wake_config 设置你希望如何被唤醒。`;
      }
-@@ -6765,15 +8117,47 @@
+@@ -6765,15 +8120,47 @@
      if (reason === 'proactiveCheck') {
        return `${base}【主动机会】${key}\n原因：群里已经安静了一段时间，这是一次你可以主动冒泡的机会。\n优先主动开个话题、追问上次没聊完的事、分享一个刚想到的想法；如果一时想不到，可以用 mcp__web-search-safe__web_search 搜一下当前热点/时事/网络热梗，再结合记忆里的群友兴趣挑一个自然角度。只要内容自然，就大胆开口；如果实在没话想说，再安静收尾（qq_mark_read 或 qq_set_wake_config）。`;
      }
@@ -1619,7 +1622,7 @@
      const st = getSocialV2State(key);
      const tokenLine = `【会话令牌】${st.agentToken}（调用二代状态工具时请在参数中带上此令牌）\n\n`;
      const preSleepMs = Math.max(0, Number(cfg.socialV2?.wake?.preSleepWaitMs) || 300000);
-@@ -6933,9 +8317,35 @@
+@@ -6933,9 +8320,35 @@
      return WAKE_PRIORITY[base] ?? 0;
    }
  
@@ -1655,7 +1658,7 @@
      if (!isSessionAllowedInCurrentMode(key)) {
        log(`[reserved2] 跳过计划唤醒 ${key}（${reason}）：会话已不在当前模式允许范围内`);
        return;
-@@ -6967,7 +8377,10 @@
+@@ -6967,7 +8380,10 @@
        st.sleepTimer = null;
      }
      st.pendingWakeReason = reason;
@@ -1667,7 +1670,7 @@
      st.pendingWakeTimer = setTimeout(() => {
        st.pendingWakeTimer = null;
        const finalReason = st.pendingWakeReason || reason;
-@@ -7259,6 +8672,8 @@
+@@ -7259,6 +8675,8 @@
        appendSocialV2Message(key, sender, textContent, plainContent, quoteTargetIsSelf, isOwner, event.message_id ?? event.msg_id ?? null, mediaList, event.user_id ?? null, extractForwardIds(event.message ?? []));
        // 二代同样收集群聊黑话学习素材（AI 自主提交之外，桥接仍自动提取高频陌生词）
        if (kind === 'group') feedSlangWindow(key, sender, plainContent);
@@ -1676,7 +1679,7 @@
        if (socialV2.paused) {
          appendActivity(`${key} [reserved2] AI 已暂停，消息仅入库不唤醒：${textContent.slice(0, 80)}`);
          return;
-@@ -7269,6 +8684,14 @@
+@@ -7269,6 +8687,14 @@
          saveSocialV2State();
          scheduleWakeV2(key, 'bootstrap');
        } else {
@@ -1691,7 +1694,7 @@
          const reason = evaluateWakeTriggerV2(key, st, event, kind, textContent, plainContent, quoteTargetIsSelf);
          if (reason) {
            scheduleWakeV2(key, reason);
-@@ -7901,7 +9324,19 @@
+@@ -7901,7 +9327,19 @@
                } else if (ended.reason.kind === 'error') {
                  const msg = ended.reason.error?.message ?? '未知错误';
                  const safeMsg = shouldAuditKey(key) && SENSITIVE_RE.test(msg) ? '（含敏感信息，已隐藏）' : msg.slice(0, 500);
