@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { retentionOf } from './forgetting.mjs';
 
 const TYPES = new Set(['person', 'event', 'pref', 'fact', 'promise']);
 export const validKey = key => /^(group|private):\d+$/.test(String(key));
@@ -31,7 +32,7 @@ export function migrate(records) {
     ...m, schemaVersion: 2,
     // 无会话来源的旧记录不自动公开；仅游戏研究产生的非用户知识允许全局使用。
     visibility: validKey(m.key) ? 'conversation' : m.source === 'game-study' ? 'global' : 'quarantine',
-    status: ['active', 'superseded', 'completed'].includes(m.status) ? m.status : 'active',
+    status: ['active', 'superseded', 'completed', 'invalidated'].includes(m.status) ? m.status : 'active',
     subjectId: /^\d+$/.test(String(m.subjectId ?? '')) ? String(m.subjectId) : null,
     confidence: clamp(finite(m.confidence, m.source === 'auto' ? 0.6 : 0.8), 0, 1),
     sourceMessageIds: Array.isArray(m.sourceMessageIds) ? [...new Set(m.sourceMessageIds.map(String))].slice(0, 40) : [],
@@ -65,7 +66,7 @@ export function remember(records, input, { now = Date.now(), maxRecords = 5000 }
   if (records.length >= maxRecords) throw new Error('记忆容量已满，请清理或提高 maxRecords');
   const entry = {
     schemaVersion: 2, id: `lm-${crypto.randomUUID()}`, text, type, key, subjectId,
-    visibility: global ? 'global' : 'conversation', status: 'active',
+    visibility: global ? 'global' : 'conversation', status: 'active', badHits: 0,
     ts: now, lastTs: now, importance: clamp(finite(input.importance, 3), 1, 5),
     confidence: clamp(finite(input.confidence, input.source === 'auto' ? 0.6 : 0.8), 0, 1),
     tags: Array.isArray(input.tags) ? [...new Set(input.tags.map(String))].slice(0, 5) : [],
@@ -93,9 +94,13 @@ export function search(records, { key, query = '', limit = 6, subjectId, now = D
     if (q && lexical < 0.2 && semantic < minSemantic) return null;
     const relevance = Math.max(lexical, semantic >= minSemantic ? semantic : 0);
     const confidence = clamp(finite(m.confidence, 0.6), 0, 1);
-    const age = Math.max(0, now - finite(m.ts, now));
+    // 遗忘保持度（半衰期）：person/fact 不衰减，pref 3 天，promise/event 30 天
+    const tier = { person: 'hard', fact: 'hard', pref: 'general', promise: 'long', event: 'long' }[m.type] ?? 'general';
+    const retention = retentionOf({ tier, lastAt: m.lastTs ?? m.ts }, now);
+    // 反自强化：召回后被判无关累计降权（最多 −0.4）
+    const badHitPenalty = Math.min(0.4, (m.badHits ?? 0) * 0.1);
     const score = relevance * 0.85 + confidence * 0.05 + clamp(finite(m.importance, 3), 1, 5) / 5 * 0.07
-      + 0.03 * 2 ** (-age / (30 * 86400000));
+      + 0.03 * retention - badHitPenalty;
     return { ...m, score };
   }).filter(Boolean).sort((a, b) => b.score - a.score || finite(b.ts, 0) - finite(a.ts, 0))
     .slice(0, clamp(finite(limit, 6), 1, 50));
@@ -113,7 +118,25 @@ export function forget(records, id, { key, admin = false } = {}) {
       for (const id of [m.id, m.supersedes].filter(Boolean)) if (!ids.has(id)) { ids.add(id); changed = true; }
     }
   }
-  return { records: records.filter(m => m.key !== entry.key || !ids.has(m.id)), removed: records.filter(m => m.key === entry.key && ids.has(m.id)).length };
+  // 墓碑：把整条版本链标记为 invalidated，不物理删除（可 reinstate 恢复）。
+  return { records: records.map(m => ids.has(m.id) ? { ...m, status: 'invalidated' } : m), removed: records.filter(m => ids.has(m.id)).length };
+}
+
+// 反自强化：召回后被判无关，记一笔负反馈，累计降权（不删）。
+export function applyBadHit(records, id, { key, admin = false, now = Date.now() } = {}) {
+  const entry = records.find(m => m.id === id && (admin || (validKey(key) && m.key === key)));
+  if (!entry || entry.status !== 'active') return { records, badHit: false };
+  return {
+    records: records.map(m => m.id === id ? { ...m, badHits: (m.badHits ?? 0) + 1, lastTs: now } : m),
+    badHit: true,
+  };
+}
+
+// 撤销作废：把 invalidated 的记忆恢复为 active。
+export function reinstate(records, id, { key, admin = false } = {}) {
+  const entry = records.find(m => m.id === id && (admin || (validKey(key) && m.key === key)));
+  if (!entry || entry.status !== 'invalidated') return { records, restored: 0 };
+  return { records: records.map(m => m.id === id ? { ...m, status: 'active' } : m), restored: 1 };
 }
 
 export function digest(entries) {

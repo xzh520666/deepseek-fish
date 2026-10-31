@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { migrate, remember, search, forget, cosine, digest } from '../mcp/memory-store.mjs';
+import { migrate, remember, search, forget, reinstate, cosine, digest } from '../mcp/memory-store.mjs';
 import { MemoryRetriever, localEncoder } from '../mcp/memory-retriever.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -43,13 +43,20 @@ test('explicit correction supersedes old version without changing other people',
   assert.equal(search(records, { key: 'group:1', query: '辅助', now }).length, 1);
   assert.throws(() => add(records, '改成另一个人的偏好', { subjectId: '22', replacesId: records[1].id }));
 });
-test('forget removes version chain and embedded data, cannot cross scopes', () => {
+test('forget marks version chain as invalidated (tombstone), cannot cross scopes', () => {
   let records = add([], '小张喜欢玩打野', { embedding: [1, 0], embeddingModel: 'test' });
   records = add(records, '小张喜欢玩辅助', { replacesId: records[0].id });
   assert.equal(forget(records, records[1].id, { key: 'private:11' }).removed, 0);
   const result = forget(records, records[1].id, { key: 'group:1' });
   assert.equal(result.removed, 2);
-  assert.deepEqual(result.records, []);
+  // 墓碑：不物理删除，整条版本链标记为 invalidated
+  assert.equal(result.records.length, 2);
+  assert.ok(result.records.every(m => m.status === 'invalidated'));
+  // invalidated 不再被检索，且可 reinstate 恢复
+  assert.equal(search(result.records, { key: 'group:1', query: '打野', now }).length, 0);
+  const restored = reinstate(result.records, records[1].id, { key: 'group:1' });
+  assert.equal(restored.restored, 1);
+  assert.equal(search(restored.records, { key: 'group:1', query: '辅助', now }).length, 1);
 });
 test('expired and unknown-status memories are not retrieved', () => {
   const records = add([], '周五晚上一起开黑', { type: 'promise', expiresAt: now + 100 });

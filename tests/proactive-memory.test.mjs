@@ -13,16 +13,15 @@ test('weekdayOf returns correct weekday name', () => {
   assert.equal(weekdayOf(new Date('2026-11-02T00:00:00')), '周一');
 });
 
-test('scanDue surfaces near-term and matching-weekday promises', () => {
+test('scanDue surfaces promises due within 24h via parseDue', () => {
   const now = new Date('2026-10-31T12:00:00'); // 周六
   const list = [
-    mem('今晚开黑', 'promise'),
-    mem('周六下午打篮球', 'promise'),
-    mem('明天要上班', 'event'),
-    mem('以后一起玩', 'promise'),
+    mem('明天下午开黑', 'promise'),   // parseDue 解析"明天" → 24h 内命中
+    mem('下周五开黑', 'promise'),      // 太远，不命中
+    mem('以后一起玩', 'promise'),      // 解析不出，不命中
   ];
   const hit = scanDue(list, { now }).map(m => m.text);
-  assert.deepEqual(hit.sort(), ['今晚开黑', '明天要上班', '周六下午打篮球'].sort());
+  assert.deepEqual(hit, ['明天下午开黑']);
 });
 
 test('scanDue surfaces event keywords regardless of date', () => {
