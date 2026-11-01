@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>小肥鱼后台管理</title>
+<script src="https://cdn.jsdelivr.net/npm/vue@3/dist/vue.global.prod.js"></script>
+<style>
+  :root { --bg:#0f1115; --panel:#171a21; --border:#2a2f3a; --text:#e6e9ef; --muted:#8b93a1; --accent:#4f8cff; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { background:var(--bg); color:var(--text); font-family:-apple-system,"Segoe UI",sans-serif; height:100vh; display:flex; }
+  .sidebar { width:200px; background:var(--panel); border-right:1px solid var(--border); padding:16px 0; flex-shrink:0; }
+  .logo { padding:0 20px 16px; font-weight:700; font-size:15px; }
+  .nav { list-style:none; }
+  .nav li { padding:10px 20px; cursor:pointer; color:var(--muted); font-size:14px; }
+  .nav li.active { color:var(--accent); border-right:2px solid var(--accent); background:rgba(79,140,255,.08); }
+  .nav li:hover { color:var(--text); }
+  .main { flex:1; padding:24px; overflow-y:auto; }
+  h2 { font-size:18px; margin-bottom:16px; }
+  .conn-bar { display:flex; gap:8px; margin-bottom:16px; flex-wrap:wrap; }
+  input { background:var(--panel); border:1px solid var(--border); color:var(--text); padding:8px 10px; border-radius:6px; font-size:13px; }
+  input:focus { outline:none; border-color:var(--accent); }
+  button { background:var(--accent); border:none; color:#fff; padding:8px 14px; border-radius:6px; cursor:pointer; font-size:13px; }
+  button:hover { opacity:.9; }
+  button.secondary { background:transparent; border:1px solid var(--border); color:var(--text); }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th,td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--border); }
+  th { color:var(--muted); font-weight:500; }
+  .tag { display:inline-block; padding:2px 8px; border-radius:10px; font-size:11px; }
+  .tag.active { background:rgba(46,160,67,.15); color:#3fb950; }
+  .tag.invalidated { background:rgba(139,147,161,.15); color:var(--muted); }
+  .tag.hard { background:rgba(79,140,255,.15); color:var(--accent); }
+  .muted { color:var(--muted); }
+  .placeholder { padding:40px; text-align:center; color:var(--muted); border:1px dashed var(--border); border-radius:8px; }
+  .bar { height:6px; background:var(--panel); border-radius:3px; overflow:hidden; width:80px; }
+  .bar > div { height:100%; background:var(--accent); }
+</style>
+</head>
+<body>
+<div id="app">
+  <div class="sidebar">
+    <div class="logo">🐟 小肥鱼后台</div>
+    <ul class="nav">
+      <li :class="{active: tab==='memory'}" @click="tab='memory'">记忆中心</li>
+      <li :class="{active: tab==='config'}" @click="tab='config'">配置中心</li>
+      <li :class="{active: tab==='learn'}" @click="tab='learn'">学习中心</li>
+    </ul>
+  </div>
+
+  <div class="main">
+    <!-- 记忆中心 -->
+    <div v-if="tab==='memory'">
+      <h2>记忆中心</h2>
+      <div class="conn-bar">
+        <input v-model="base" placeholder="服务器地址 http://127.0.0.1:3100" style="width:260px">
+        <input v-model="token" placeholder="console-token" style="width:200px">
+        <button @click="loadMemories">连接</button>
+        <span class="muted" v-if="connMsg">{{ connMsg }}</span>
+      </div>
+
+      <table v-if="memories.length">
+        <thead>
+          <tr><th>记忆</th><th>类型</th><th>重要度</th><th>状态</th><th>badHit</th><th>最后提及</th></tr>
+        </thead>
+        <tbody>
+          <tr v-for="m in memories" :key="m.id">
+            <td>{{ m.text }}</td>
+            <td><span class="tag hard">{{ typeLabel(m.type) }}</span></td>
+            <td>
+              <div class="bar"><div :style="{width: (m.importance/5*100)+'%'}"></div></div>
+            </td>
+            <td><span class="tag" :class="m.status">{{ m.status || 'active' }}</span></td>
+            <td>{{ m.badHits || 0 }}</td>
+            <td class="muted">{{ fmtTime(m.lastTs) }}</td>
+          </tr>
+        </tbody>
+      </table>
+      <div v-else-if="!connMsg" class="placeholder">填写服务器地址和 console-token 后点「连接」</div>
+      <div v-else class="placeholder">暂无记忆，或连接失败</div>
+    </div>
+
+    <!-- 配置中心 -->
+    <div v-else-if="tab==='config'">
+      <h2>配置中心</h2>
+      <div class="placeholder">
+        待实现：人设卡 / 语气风格 / 情绪策略的可视化编辑<br>
+        <span class="muted">（依赖 mood.mjs 接线 + 后端配置读写 API）</span>
+      </div>
+    </div>
+
+    <!-- 学习中心 -->
+    <div v-else>
+      <h2>学习中心</h2>
+      <div class="placeholder">
+        待实现：派「学习 XX」任务、看进度、看结果、撤销<br>
+        <span class="muted">（依赖后端「通用学习任务」框架）</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const { createApp } = Vue;
+createApp({
+  data() {
+    return {
+      tab: 'memory',
+      base: 'http://127.0.0.1:3100',
+      token: '',
+      memories: [],
+      connMsg: '',
+    };
+  },
+  methods: {
+    typeLabel(t) {
+      return { person:'人物', event:'事件', pref:'偏好', fact:'事实', promise:'约定' }[t] || t;
+    },
+    fmtTime(ts) {
+      if (!ts) return '-';
+      const d = new Date(Number(ts));
+      return `${d.getMonth()+1}/${d.getDate()} ${d.getHours()}:${String(d.getMinutes()).padStart(2,'0')}`;
+    },
+    async loadMemories() {
+      this.connMsg = '连接中…';
+      try {
+        const res = await fetch(`${this.base.replace(/\/$/,'')}/api/memory/long?limit=100`, {
+          headers: { 'x-console-token': this.token },
+        });
+        const data = await res.json();
+        if (!data.ok && data.error) throw new Error(data.error);
+        this.memories = data.entries || [];
+        this.connMsg = `已加载 ${this.memories.length} 条记忆`;
+      } catch (e) {
+        this.connMsg = '连接失败：' + e.message;
+        this.memories = [];
+      }
+    },
+  },
+}).mount('#app');
+</script>
+</body>
+</html>
