@@ -50,7 +50,7 @@
     <div class="logo">🐟 小肥鱼后台</div>
     <ul class="nav">
       <li :class="{active: tab==='memory'}" @click="tab='memory'">记忆中心</li>
-      <li :class="{active: tab==='config'}" @click="tab='config'">配置中心</li>
+      <li :class="{active: tab==='config'}" @click="switchConfig">配置中心</li>
       <li :class="{active: tab==='learn'}" @click="tab='learn'">学习中心</li>
     </ul>
   </div>
@@ -60,9 +60,8 @@
     <div v-if="tab==='memory'">
       <h2>记忆中心</h2>
       <div class="conn-bar">
-        <input v-model="base" placeholder="服务器地址 http://127.0.0.1:3100" style="width:260px">
-        <input v-model="token" placeholder="console-token" style="width:200px">
-        <button @click="loadMemories">连接</button>
+        <input v-model="base" placeholder="管理服务地址（留空=同源）" style="width:260px">
+        <button @click="loadMemories">加载记忆</button>
         <span class="muted" v-if="connMsg">{{ connMsg }}</span>
       </div>
 
@@ -86,21 +85,35 @@
             <td><span class="tag" :class="m.status">{{ m.status || 'active' }}</span></td>
             <td>
               <button class="secondary" v-if="m.status==='active'" @click="forgetMemory(m)">作废</button>
+              <button class="secondary" v-if="m.status==='invalidated'" @click="reinstateMemory(m)">恢复</button>
+              <button class="secondary" v-if="m.status==='active'" @click="badHitMemory(m)">召回错</button>
             </td>
           </tr>
         </tbody>
       </table>
-      <div v-else-if="!connMsg" class="placeholder">填写服务器地址和 console-token 后点「连接」</div>
+      <div v-else-if="!connMsg" class="placeholder">点「加载记忆」拉取记忆列表</div>
       <div v-else class="placeholder">暂无记忆，或连接失败</div>
     </div>
 
     <!-- 配置中心 -->
     <div v-else-if="tab==='config'">
       <h2>配置中心</h2>
-      <div class="placeholder">
-        待实现：人设卡 / 语气风格 / 情绪策略的可视化编辑<br>
-        <span class="muted">（依赖 mood.mjs 接线 + 后端配置读写 API）</span>
+      <div style="background:var(--panel); border:1px solid var(--border); border-radius:8px; padding:16px; margin-bottom:16px;">
+        <div style="margin-bottom:8px;">
+          AI 当前状态：<strong :style="{color: moodColor}">{{ mood.mood }}</strong>
+          <span class="muted">（energy {{ (mood.energy*100).toFixed(0) }}%）</span>
+        </div>
+        <div class="bar" style="width:220px; height:10px;">
+          <div :style="{width: (mood.energy*100)+'%', background: moodColor}"></div>
+        </div>
+        <div style="margin-top:12px; display:flex; gap:8px;">
+          <button @click="setMood(0.9)">设为开心</button>
+          <button @click="setMood(0.5)">设为平静</button>
+          <button @click="setMood(0.3)">设为疲惫</button>
+          <button class="secondary" @click="loadMood">刷新</button>
+        </div>
       </div>
+      <div class="placeholder">待实现：人设卡 / 语气风格 / 情绪策略的可视化编辑</div>
     </div>
 
     <!-- 学习中心 -->
@@ -121,8 +134,8 @@ createApp({
     return {
       tab: 'memory',
       base: '',
-      token: '',
       memories: [],
+      mood: { energy: 0.5, mood: '平静' },
       connMsg: '',
     };
   },
@@ -136,17 +149,15 @@ createApp({
       return `${d.getMonth()+1}/${d.getDate()} ${d.getHours()}:${String(d.getMinutes()).padStart(2,'0')}`;
     },
     async loadMemories() {
-      this.connMsg = '连接中…';
+      this.connMsg = '加载中…';
       try {
-        const res = await fetch(`${this.base.replace(/\/$/,'')}/api/memory/long?limit=100`, {
-          headers: { 'x-console-token': this.token },
-        });
+        const res = await fetch(`${this.base.replace(/\/$/,'')}/api/memories?limit=100`);
         const data = await res.json();
         if (!data.ok && data.error) throw new Error(data.error);
         this.memories = data.entries || [];
         this.connMsg = `已加载 ${this.memories.length} 条记忆`;
       } catch (e) {
-        this.connMsg = '连接失败：' + e.message;
+        this.connMsg = '加载失败：' + e.message;
         this.memories = [];
       }
     },
@@ -175,17 +186,65 @@ createApp({
     async forgetMemory(m) {
       if (!confirm(`作废这条记忆？\n「${m.text}」`)) return;
       try {
-        const res = await fetch(`${this.base.replace(/\/$/,'')}/api/memory/long/forget`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json', 'x-console-token': this.token },
+        const res = await fetch(`${this.base.replace(/\/$/,'')}/api/memories/forget`, {
+          method: 'POST', headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ id: m.id }),
         });
         const data = await res.json();
-        if (data.ok || data.removed) m.status = 'invalidated';
+        if (data.ok) m.status = 'invalidated';
         else alert('作废失败：' + (data.error || '未知'));
-      } catch (e) {
-        alert('作废失败：' + e.message);
-      }
+      } catch (e) { alert('作废失败：' + e.message); }
+    },
+    async reinstateMemory(m) {
+      try {
+        const res = await fetch(`${this.base.replace(/\/$/,'')}/api/memories/reinstate`, {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ id: m.id }),
+        });
+        const data = await res.json();
+        if (data.ok) m.status = 'active';
+        else alert('恢复失败：' + (data.error || '未知'));
+      } catch (e) { alert('恢复失败：' + e.message); }
+    },
+    async badHitMemory(m) {
+      try {
+        const res = await fetch(`${this.base.replace(/\/$/,'')}/api/memories/badhit`, {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ id: m.id }),
+        });
+        const data = await res.json();
+        if (data.ok) m.badHits = (m.badHits || 0) + 1;
+        else alert('标记失败：' + (data.error || '未知'));
+      } catch (e) { alert('标记失败：' + e.message); }
+    },
+    switchConfig() {
+      this.tab = 'config';
+      this.loadMood();
+    },
+    async loadMood() {
+      try {
+        const res = await fetch(`${this.base.replace(/\/$/,'')}/api/mood`);
+        const data = await res.json();
+        if (data.ok) this.mood = { energy: data.energy, mood: data.mood };
+      } catch (e) {}
+    },
+    async setMood(energy) {
+      try {
+        const res = await fetch(`${this.base.replace(/\/$/,'')}/api/mood`, {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ energy }),
+        });
+        const data = await res.json();
+        if (data.ok) this.mood = { energy: data.energy, mood: data.mood };
+      } catch (e) { alert('设置失败：' + e.message); }
+    },
+  },
+  computed: {
+    moodColor() {
+      const e = this.mood.energy;
+      if (e > 0.7) return '#a6e3a1';
+      if (e < 0.4) return '#f38ba8';
+      return '#89b4fa';
     },
   },
 }).mount('#app');
